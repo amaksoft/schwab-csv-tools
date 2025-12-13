@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schwab-csv-tools"
+version = "0.1.0"
+description = "Utilities for processing Charles Schwab CSV files"
+authors = [{ name = "Andrei Makeev", email = "amaksoft@gmail.com" }]
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Financial",
+  "Typing :: Typed",
+]
+keywords = [
+  "Charles Schwab",
+  "CSV",
+  "broker export",
+  "financial tools",
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.urls]
+"Homepage" = "https://github.com/amaksoft/schwab-csv-tools"
+"Repository" = "https://github.com/amaksoft/schwab-csv-tools"
+
+[project.scripts]
+merge-schwab-csv = "schwab_csv_tools.merge_transactions:main"
+merge-schwab-awards = "schwab_csv_tools.merge_awards:main"
+postprocess-schwab-csv = "schwab_csv_tools.postprocess:main"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+  "E",  # pycodestyle
+  "F",  # pyflakes
+  "I",  # isort
+  "UP", # pyupgrade
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
