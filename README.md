@@ -271,8 +271,11 @@ cd schwab-csv-tools
 # Install in development mode
 pip install -e .
 
-# Run tests (if available)
+# Run tests
 pytest
+
+# Run tests with verbose output
+pytest -v
 ```
 
 ### Project Structure
@@ -281,11 +284,15 @@ pytest
 schwab_csv_tools/
 ├── schwab_csv_tools/
 │   ├── __init__.py
-│   ├── merge_transactions.py
-│   ├── merge_awards.py
-│   └── postprocess.py
+│   ├── common.py              # Shared utilities, constants, dataclasses
+│   ├── cgt_wrapper.py          # One-command workflow orchestrator
+│   ├── merge_transactions.py   # Transaction CSV merging
+│   ├── merge_awards.py         # Equity awards CSV merging
+│   └── postprocess.py          # Symbol fixing and rounding errors
 ├── tests/
-│   └── ...
+│   ├── test_merge_transactions.py
+│   ├── test_merge_awards.py
+│   └── test_postprocess_schwab_csv.py
 ├── pyproject.toml
 ├── README.md
 └── LICENSE
