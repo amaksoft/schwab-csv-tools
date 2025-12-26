@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .merge_config_files import merge_initial_prices, merge_spin_offs
+
 
 def _find_executable_in_env(script_name: str) -> Path | None:
     """Find an executable in the same Python environment.
@@ -128,10 +130,20 @@ Example usage:
     --awards awards1.csv awards2.csv \\
     --year 2024
 
-  # With optional symbol mapping and specific output directory
+  # With optional config files
   cgt-calc-wrapper \\
     --transactions tx1.csv tx2.csv \\
     --awards awards1.csv awards2.csv \\
+    --initial-prices prices.csv \\
+    --spin-offs spinoffs.csv \\
+    --year 2024
+
+  # With all optional settings
+  cgt-calc-wrapper \\
+    --transactions tx1.csv tx2.csv \\
+    --awards awards1.csv awards2.csv \\
+    --initial-prices prices1.csv prices2.csv \\
+    --spin-offs spinoffs.csv \\
     --symbol-mapping mappings.csv \\
     --output-dir ./processed \\
     --year 2024 \\
@@ -142,7 +154,7 @@ Example usage:
     --transactions tx.csv \\
     --awards awards.csv \\
     --year 2024 \\
-    -- --initial-prices initial.csv --verbose
+    -- --verbose
         """,
     )
 
@@ -162,6 +174,20 @@ Example usage:
         required=True,
         metavar="FILE",
         help="Schwab equity awards CSV files to merge",
+    )
+    parser.add_argument(
+        "--initial-prices",
+        "-i",
+        nargs="+",
+        metavar="FILE",
+        help="Initial prices CSV files to merge (optional)",
+    )
+    parser.add_argument(
+        "--spin-offs",
+        "-s",
+        nargs="+",
+        metavar="FILE",
+        help="Spin-offs CSV files to merge (optional)",
     )
 
     # Processing options
@@ -234,8 +260,25 @@ Example usage:
     transactions_raw_merged = output_dir / f"transactions_raw_merged_{args.year}.csv"
     awards_merged = output_dir / f"awards_merged_{args.year}.csv"
     transactions_merged = output_dir / f"transactions_merged_{args.year}.csv"
+    initial_prices_merged = (
+        output_dir / f"initial_prices_merged_{args.year}.csv"
+        if args.initial_prices
+        else None
+    )
+    spin_offs_merged = (
+        output_dir / f"spin_offs_merged_{args.year}.csv"
+        if args.spin_offs
+        else None
+    )
 
     try:
+        step_num = 1
+        total_steps = 4
+        if args.initial_prices:
+            total_steps += 1
+        if args.spin_offs:
+            total_steps += 1
+
         # Step 1: Merge transaction files
         merge_tx_cmd = [
             find_script_in_same_env("merge-schwab-csv"),
@@ -245,7 +288,10 @@ Example usage:
         ]
         if args.verbose:
             merge_tx_cmd.append("-v")
-        run_command(merge_tx_cmd, "Step 1/4: Merging transaction files")
+        run_command(
+            merge_tx_cmd, f"Step {step_num}/{total_steps}: Merging transaction files"
+        )
+        step_num += 1
 
         # Step 2: Merge equity awards files
         merge_awards_cmd = [
@@ -256,9 +302,39 @@ Example usage:
         ]
         if args.verbose:
             merge_awards_cmd.append("-v")
-        run_command(merge_awards_cmd, "Step 2/4: Merging equity awards files")
+        run_command(
+            merge_awards_cmd,
+            f"Step {step_num}/{total_steps}: Merging equity awards files",
+        )
+        step_num += 1
 
-        # Step 3: Postprocess transactions
+        # Step 3 (optional): Merge initial prices files
+        if args.initial_prices:
+            if args.verbose:
+                print(f"\n{'=' * 70}")
+                print(f"Step {step_num}/{total_steps}: Merging initial prices files")
+                print(f"{'=' * 70}\n")
+            merge_initial_prices(
+                [Path(f) for f in args.initial_prices],
+                initial_prices_merged,
+                args.verbose,
+            )
+            print(f"\n✅ Step {step_num}/{total_steps} completed successfully")
+            step_num += 1
+
+        # Step 4 (optional): Merge spin-offs files
+        if args.spin_offs:
+            if args.verbose:
+                print(f"\n{'=' * 70}")
+                print(f"Step {step_num}/{total_steps}: Merging spin-offs files")
+                print(f"{'=' * 70}\n")
+            merge_spin_offs(
+                [Path(f) for f in args.spin_offs], spin_offs_merged, args.verbose
+            )
+            print(f"\n✅ Step {step_num}/{total_steps} completed successfully")
+            step_num += 1
+
+        # Step N-1: Postprocess transactions
         postprocess_cmd = [
             find_script_in_same_env("postprocess-schwab-csv"),
             str(transactions_raw_merged),
@@ -272,9 +348,12 @@ Example usage:
             postprocess_cmd.extend(["-m", args.symbol_mapping])
         if args.verbose:
             postprocess_cmd.append("-v")
-        run_command(postprocess_cmd, "Step 3/4: Postprocessing transactions")
+        run_command(
+            postprocess_cmd, f"Step {step_num}/{total_steps}: Postprocessing transactions"
+        )
+        step_num += 1
 
-        # Step 4: Run cgt-calc
+        # Step N: Run cgt-calc
         cgt_calc_cmd = [
             str(cgt_calc),
             "--schwab-file",
@@ -285,6 +364,14 @@ Example usage:
             str(args.year),
         ]
 
+        # Add initial prices if provided
+        if initial_prices_merged:
+            cgt_calc_cmd.extend(["--initial-prices-file", str(initial_prices_merged)])
+
+        # Add spin-offs if provided
+        if spin_offs_merged:
+            cgt_calc_cmd.extend(["--spin-offs-file", str(spin_offs_merged)])
+
         if args.pdf:
             cgt_calc_cmd.extend(["--output", args.pdf])
 
@@ -294,7 +381,7 @@ Example usage:
         elif args.cgt_calc_args:
             cgt_calc_cmd.extend(args.cgt_calc_args)
 
-        run_command(cgt_calc_cmd, "Step 4/4: Running cgt-calc")
+        run_command(cgt_calc_cmd, f"Step {step_num}/{total_steps}: Running cgt-calc")
 
         # Cleanup intermediate files based on --keep-intermediates setting
         if args.keep_intermediates is None:
@@ -303,6 +390,10 @@ Example usage:
             transactions_raw_merged.unlink(missing_ok=True)
             awards_merged.unlink(missing_ok=True)
             transactions_merged.unlink(missing_ok=True)
+            if initial_prices_merged:
+                initial_prices_merged.unlink(missing_ok=True)
+            if spin_offs_merged:
+                spin_offs_merged.unlink(missing_ok=True)
             print("   Removed all intermediate CSV files")
         elif args.keep_intermediates == "finals":
             # Keep finals only
@@ -311,12 +402,20 @@ Example usage:
             print(f"   Removed {transactions_raw_merged.name}")
             print(f"   Kept {awards_merged.name}")
             print(f"   Kept {transactions_merged.name}")
+            if initial_prices_merged:
+                print(f"   Kept {initial_prices_merged.name}")
+            if spin_offs_merged:
+                print(f"   Kept {spin_offs_merged.name}")
         elif args.keep_intermediates == "A":
             # Keep everything
             print("\n📁 Kept all intermediate files:")
             print(f"   {transactions_raw_merged.name}")
             print(f"   {awards_merged.name}")
             print(f"   {transactions_merged.name}")
+            if initial_prices_merged:
+                print(f"   {initial_prices_merged.name}")
+            if spin_offs_merged:
+                print(f"   {spin_offs_merged.name}")
         else:
             print(f"\n⚠️  Unknown --keep-intermediates value: {args.keep_intermediates}")
             print("   Valid options: (no value) for finals only, 'A' for all")
