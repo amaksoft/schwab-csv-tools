@@ -10,70 +10,29 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Final
 
-# Constants
-REQUIRED_HEADERS: Final[set[str]] = {
-    "Date",
-    "Action",
-    "Symbol",
-    "Description",
-    "Price",
-    "Quantity",
-    "Fees & Comm",
-    "Amount",
-}
-MIN_COLUMNS: Final = 8
-MAX_COLUMNS: Final = 9
-MAX_SYMBOL_LENGTH: Final = 8
-
-
-class ValidationError(Exception):
-    """CSV validation error."""
-
-    pass
-
-
-def parse_schwab_date(date_str: str) -> datetime | None:
-    """Parse Schwab date format.
-
-    Handles:
-    - Standard format: "MM/DD/YYYY"
-    - "as of" format: "06/02/2025 as of 05/30/2025" → uses 05/30/2025
-
-    Args:
-        date_str: Date string from Schwab CSV
-
-    Returns:
-        Parsed datetime or None if parsing fails
-
-    Examples:
-        >>> parse_schwab_date("05/30/2025")
-        datetime(2025, 5, 30)
-        >>> parse_schwab_date("06/02/2025 as of 05/30/2025")
-        datetime(2025, 5, 30)
-    """
-    if not date_str or not date_str.strip():
-        return None
-
-    date_str = date_str.strip()
-
-    # Check for "as of" format
-    if " as of " in date_str.lower():
-        # Extract the actual transaction date (after "as of")
-        parts = date_str.lower().split(" as of ")
-        if len(parts) == 2:
-            date_str = parts[1].strip()
-
-    try:
-        return datetime.strptime(date_str, "%m/%d/%Y")
-    except ValueError:
-        return None
+# Import shared utilities from common module
+from .common import (
+    DESC_LONG,
+    DESC_MEDIUM,
+    DESC_SHORT,
+    MAX_ROUNDING_DIFF,
+    MAX_SYMBOL_LENGTH,
+    MIN_COLUMNS,
+    MAX_COLUMNS,
+    MIN_ROUNDING_DIFF,
+    REQUIRED_HEADERS,
+    SECURITY_ACTIONS,
+    ValidationError,
+    generate_symbol_from_description,
+    parse_currency,
+    parse_schwab_date,
+    truncate_text,
+)
 
 
 def get_uk_tax_year_end(tax_year: int) -> datetime:
@@ -93,57 +52,6 @@ def get_uk_tax_year_end(tax_year: int) -> datetime:
         datetime(2025, 4, 5)
     """
     return datetime(tax_year + 1, 4, 5)
-
-
-def generate_symbol_from_description(description: str) -> str:
-    """Generate synthetic ticker symbol from description.
-
-    Algorithm:
-    1. Uppercase and normalize
-    2. Strip special chars: &, ., -, (), [], commas
-    3. Split into words
-    4. Take first letter of each word
-    5. Truncate to 8 characters max
-
-    Args:
-        description: Security description
-
-    Returns:
-        Generated symbol (e.g., "ISHARES EDGE MSCI WORLD" → "IEMW")
-
-    Examples:
-        >>> generate_symbol_from_description("ISHARES EDGE MSCI WORLD VALUE FACTOR")
-        'IEMWVF'
-        >>> generate_symbol_from_description("VANGUARD S&P 500 ETF")
-        'VSE'
-        >>> generate_symbol_from_description("US TREASURY NOTE 4.25%")
-        'UTN'
-    """
-    if not description or not description.strip():
-        return "UNKNOWN"
-
-    # Normalize: uppercase and clean
-    normalized = description.upper().strip()
-
-    # Remove special characters, keep alphanumeric and spaces
-    # Keep numbers if they form words (e.g., "500" in "S&P 500")
-    cleaned = re.sub(r"[&.,\-\(\)\[\]%]", " ", normalized)
-    cleaned = re.sub(r"\s+", " ", cleaned)  # Normalize whitespace
-
-    # Split into words and take first letter of each
-    words = cleaned.split()
-    if not words:
-        return "UNKNOWN"
-
-    # Generate acronym
-    acronym = "".join(word[0] for word in words if word)
-
-    # Truncate to max length
-    if len(acronym) > MAX_SYMBOL_LENGTH:
-        acronym = acronym[:MAX_SYMBOL_LENGTH]
-
-    # If empty after processing, return UNKNOWN
-    return acronym if acronym else "UNKNOWN"
 
 
 def load_mapping_file(filepath: Path, verbose: bool = False) -> dict[str, str]:
@@ -275,6 +183,394 @@ def validate_schwab_csv(filepath: Path, verbose: bool = False) -> list[str]:
     return headers
 
 
+# ============================================================================
+# Symbol Processing Classes
+# ============================================================================
+
+
+class SymbolTracker:
+    """Encapsulates symbol assignment logic for missing symbols."""
+
+    def __init__(self, mapping: dict[str, str]):
+        """Initialize the symbol tracker.
+
+        Args:
+            mapping: Description → symbol mapping dict (case-insensitive)
+        """
+        self.mapping = mapping
+        self.description_to_symbol: dict[str, str] = {}
+        self.symbol_counter: dict[str, int] = defaultdict(int)
+        self.assignments: list[dict[str, str | int]] = []
+        self.missing_symbols = 0
+        self.symbols_mapped = 0
+        self.symbols_generated = 0
+        self.missing_descriptions: dict[str, int] = defaultdict(int)
+        self.symbol_assignment_counts: dict[str, dict[str, str | int]] = defaultdict(
+            lambda: {"symbol": "", "count": 0}
+        )
+
+    def process_missing_symbol(
+        self,
+        row: dict[str, str],
+        row_num: int,
+        verbose: bool = False,
+    ) -> None:
+        """Process a row with missing symbol.
+
+        Args:
+            row: CSV row dict
+            row_num: Row number (1-indexed, accounting for header)
+            verbose: Print detailed output
+        """
+        action = row.get("Action", "").strip()
+        description = row.get("Description", "").strip()
+
+        # Only track missing symbols for security transactions
+        is_security_transaction = action in SECURITY_ACTIONS
+        if is_security_transaction:
+            self.missing_symbols += 1
+            desc_key = description if description else "(no description)"
+            self.missing_descriptions[desc_key] += 1
+
+        # Only generate symbols for security transactions
+        if not is_security_transaction:
+            return
+
+        # Generate or lookup symbol
+        if not description:
+            # No description, use fallback
+            generated_symbol = f"UNKNOWN{row_num}"
+            source = "FALLBACK"
+            if verbose:
+                print(
+                    f"  ⚠ Warning: Row {row_num} has no description, using {generated_symbol}"
+                )
+        else:
+            generated_symbol, source = self._generate_or_lookup_symbol(
+                description, verbose
+            )
+
+        # Update row
+        row["Symbol"] = generated_symbol
+
+        # Track assignment
+        self.symbol_assignment_counts[description]["symbol"] = generated_symbol
+        self.symbol_assignment_counts[description]["count"] += 1
+
+        # Track change for logging
+        self.assignments.append(
+            {
+                "row": row_num,
+                "description": description,
+                "symbol": generated_symbol,
+                "source": source,
+            }
+        )
+
+        if verbose:
+            desc_short = truncate_text(description, DESC_SHORT)
+            print(f"  Row {row_num}: {desc_short} → {generated_symbol} [{source}]")
+
+    def _generate_or_lookup_symbol(
+        self, description: str, verbose: bool = False
+    ) -> tuple[str, str]:
+        """Get symbol from mapping or generate new.
+
+        Args:
+            description: Security description
+            verbose: Print warnings for collisions
+
+        Returns:
+            Tuple of (symbol, source) where source is MAPPED, REUSED, or GENERATED
+        """
+        description_lower = description.lower()
+
+        # Check if we've already assigned a symbol for this description
+        if description_lower in self.description_to_symbol:
+            # Reuse the same symbol for identical descriptions
+            self.symbols_generated += 1
+            return self.description_to_symbol[description_lower], "REUSED"
+
+        # Try mapping first
+        if description_lower in self.mapping:
+            symbol = self.mapping[description_lower]
+            self.symbols_mapped += 1
+            # Remember this mapping
+            self.description_to_symbol[description_lower] = symbol
+            return symbol, "MAPPED"
+
+        # Generate synthetic symbol
+        symbol = generate_symbol_from_description(description)
+
+        # Handle collisions (only for different descriptions)
+        self.symbol_counter[symbol] += 1
+        if self.symbol_counter[symbol] > 1:
+            # Append numeric suffix
+            collision_num = self.symbol_counter[symbol] - 1
+            symbol = f"{symbol}{collision_num}"
+            if verbose:
+                print(f"  ⚠ Warning: Symbol collision, using {symbol}")
+
+        self.symbols_generated += 1
+        # Remember this description→symbol mapping
+        self.description_to_symbol[description_lower] = symbol
+        return symbol, "GENERATED"
+
+    def write_log(self, output_dir: Path, input_stem: str, verbose: bool = False) -> None:
+        """Write symbol assignment log file.
+
+        Args:
+            output_dir: Directory for log file
+            input_stem: Input filename stem
+            verbose: Print log file path
+        """
+        if not self.assignments:
+            return
+
+        log_file = output_dir / f"{input_stem}_symbol_changes.log"
+        with log_file.open("w", newline="", encoding="utf-8") as f:
+            log_writer = csv.DictWriter(
+                f,
+                fieldnames=["Row", "Original Description", "Assigned Symbol", "Source"],
+            )
+            log_writer.writeheader()
+            for change in self.assignments:
+                log_writer.writerow(
+                    {
+                        "Row": change["row"],
+                        "Original Description": change["description"],
+                        "Assigned Symbol": change["symbol"],
+                        "Source": change["source"],
+                    }
+                )
+        if verbose:
+            print(f"  Change log written to: {log_file}")
+
+
+class RoundingFixer:
+    """Encapsulates rounding error detection and fixing logic."""
+
+    def __init__(self):
+        """Initialize the rounding fixer."""
+        self.fixes: list[dict[str, str | int]] = []
+
+    def process_rows(
+        self, rows: list[dict[str, str]], verbose: bool = False
+    ) -> None:
+        """Fix rounding errors in all rows.
+
+        Args:
+            rows: List of CSV row dicts (modified in-place)
+            verbose: Print detailed output
+        """
+        for row_num, row in enumerate(rows, start=2):
+            self._check_and_fix_row(row, row_num, verbose)
+
+    def _check_and_fix_row(
+        self, row: dict[str, str], row_num: int, verbose: bool = False
+    ) -> None:
+        """Check single row for rounding error and fix if found.
+
+        Args:
+            row: CSV row dict (modified in-place)
+            row_num: Row number
+            verbose: Print detailed output
+        """
+        price_str = row.get("Price", "").strip()
+        quantity_str = row.get("Quantity", "").strip()
+        amount_str = row.get("Amount", "").strip()
+        fees_str = row.get("Fees & Comm", "").strip()
+
+        # Skip if any required field is missing
+        if not price_str or not quantity_str or not amount_str:
+            return
+
+        try:
+            # Parse values
+            price = parse_currency(price_str)
+            quantity = float(quantity_str.replace(",", ""))
+            amount = parse_currency(amount_str)
+            fees = parse_currency(fees_str) if fees_str else 0.0
+
+            # Calculate expected amount (accounting for fees)
+            # For sells (positive amount): quantity × price - fees
+            # For buys (negative amount): -(quantity × price + fees)
+            gross_amount = quantity * price
+            if amount >= 0:
+                # Sell transaction
+                calculated_amount = gross_amount - fees
+            else:
+                # Buy transaction
+                calculated_amount = -(gross_amount + fees)
+
+            # Check if there's a rounding discrepancy
+            # Only fix small discrepancies (MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF)
+            diff = abs(calculated_amount - amount)
+
+            if MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF:
+                # Fix the amount
+                sign = "-" if amount < 0 else ""
+                fixed_amount = f"{sign}${abs(calculated_amount):.2f}"
+
+                old_amount = row["Amount"]
+                row["Amount"] = fixed_amount
+
+                # Track fix
+                self.fixes.append(
+                    {
+                        "row": row_num,
+                        "symbol": row.get("Symbol", ""),
+                        "description": row.get("Description", "")[:30],
+                        "old_amount": old_amount,
+                        "new_amount": fixed_amount,
+                        "diff": f"${diff:.3f}",
+                    }
+                )
+
+                if verbose:
+                    symbol = row.get("Symbol", "N/A")
+                    print(
+                        f"  Row {row_num}: {symbol} amount {old_amount} → {fixed_amount} (diff: ${diff:.3f})"
+                    )
+
+        except (ValueError, ZeroDivisionError):
+            # Skip rows with invalid numeric data
+            pass
+
+    def write_log(self, output_dir: Path, input_stem: str, verbose: bool = False) -> None:
+        """Write rounding fixes log file.
+
+        Args:
+            output_dir: Directory for log file
+            input_stem: Input filename stem
+            verbose: Print log file path
+        """
+        if not self.fixes:
+            return
+
+        log_file = output_dir / f"{input_stem}_rounding_fixes.log"
+        with log_file.open("w", newline="", encoding="utf-8") as f:
+            log_writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "Row",
+                    "Symbol",
+                    "Description",
+                    "Old Amount",
+                    "New Amount",
+                    "Difference",
+                ],
+            )
+            log_writer.writeheader()
+            for fix in self.fixes:
+                log_writer.writerow(
+                    {
+                        "Row": fix["row"],
+                        "Symbol": fix["symbol"],
+                        "Description": fix["description"],
+                        "Old Amount": fix["old_amount"],
+                        "New Amount": fix["new_amount"],
+                        "Difference": fix["diff"],
+                    }
+                )
+        if verbose:
+            print(f"  Rounding fixes log written to: {log_file}")
+
+    @property
+    def fixes_count(self) -> int:
+        """Get number of fixes applied.
+
+        Returns:
+            Number of rounding fixes
+        """
+        return len(self.fixes)
+
+
+# ============================================================================
+# CSV Processing Functions
+# ============================================================================
+
+
+def _load_csv_rows(input_file: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Load CSV rows into memory.
+
+    Args:
+        input_file: Input CSV file path
+
+    Returns:
+        Tuple of (headers, rows)
+
+    Raises:
+        ValidationError: If no headers found
+    """
+    with input_file.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = reader.fieldnames
+
+    if not headers:
+        raise ValidationError(f"No headers found in file: {input_file}")
+
+    return list(headers), rows
+
+
+def _filter_by_tax_year(
+    rows: list[dict[str, str]], tax_year_end: datetime, verbose: bool = False
+) -> tuple[list[dict[str, str]], int]:
+    """Filter rows after tax year end.
+
+    Args:
+        rows: List of CSV row dicts
+        tax_year_end: UK tax year end date
+        verbose: Print detailed output
+
+    Returns:
+        Tuple of (filtered_rows, filtered_count)
+    """
+    filtered_rows = []
+    filtered_count = 0
+
+    for row in rows:
+        date_str = row.get("Date", "").strip()
+        transaction_date = parse_schwab_date(date_str)
+
+        # Keep row if date is on or before tax year end
+        # Also keep rows with unparseable dates (warnings will be shown if verbose)
+        if transaction_date is None:
+            if verbose and date_str:
+                print(f"  ⚠ Warning: Could not parse date '{date_str}', keeping row")
+            filtered_rows.append(row)
+        elif transaction_date <= tax_year_end:
+            filtered_rows.append(row)
+        else:
+            filtered_count += 1
+            if verbose:
+                desc = truncate_text(row.get("Description", ""), DESC_SHORT)
+                print(f"  Filtered: {date_str} - {desc}...")
+
+    if verbose and filtered_count > 0:
+        end_date = tax_year_end.strftime("%m/%d/%Y")
+        print(f"  Filtered out {filtered_count} row(s) after {end_date}")
+
+    return filtered_rows, filtered_count
+
+
+def _write_csv_rows(
+    output_file: Path, headers: list[str], rows: list[dict[str, str]]
+) -> None:
+    """Write processed rows to CSV.
+
+    Args:
+        output_file: Output CSV file path
+        headers: Column headers
+        rows: List of CSV row dicts
+    """
+    with output_file.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def process_csv(
     input_file: Path,
     output_file: Path,
@@ -292,7 +588,7 @@ def process_csv(
         mapping: Description → symbol mapping dict
         verbose: Enable verbose output
         write_log: Write change log file
-        fix_rounding: Fix small rounding errors ($0.01 < diff < $1.00)
+        fix_rounding: Fix small rounding errors (MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF)
             where quantity × price ≠ amount
         tax_year_end: Optional UK tax year end date; filter out
             transactions after this date
@@ -303,301 +599,46 @@ def process_csv(
     Raises:
         ValidationError: If processing fails
     """
-    # Actions that involve securities and require symbols
-    SECURITY_ACTIONS = {
-        "Buy",
-        "Sell",
-        "Stock Plan Activity",
-        "Reinvest Shares",
-        "Qual Div Reinvest",
-        "Cancel Buy",
-        "Journal",  # May involve security transfers
-    }
+    # Step 1: Load CSV rows
+    headers, rows = _load_csv_rows(input_file)
 
-    stats = {
-        "total_rows": 0,
-        "missing_symbols": 0,
-        "mapped": 0,
-        "generated": 0,
-        "rounding_fixed": 0,
-        "filtered_rows": 0,
-        "missing_descriptions": defaultdict(int),  # Track description counts for missing symbols
-        "symbol_assignments": defaultdict(lambda: {"symbol": "", "count": 0}),  # Track symbol->description assignments
-    }
+    total_rows = len(rows)
 
-    changes = []  # Track all changes for logging
-    symbol_tracker: dict[str, int] = defaultdict(
-        int
-    )  # Track generated symbols for collision detection
-    description_to_symbol: dict[
-        str, str
-    ] = {}  # Track description→symbol mapping to ensure consistency
-
-    # Read input
-    with input_file.open(encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-        headers = reader.fieldnames
-
-    if not headers:
-        raise ValidationError(f"No headers found in file: {input_file}")
-
-    stats["total_rows"] = len(rows)
-
-    # Filter rows by date if tax_year_end is specified
+    # Step 2: Filter by tax year if specified
+    filtered_count = 0
     if tax_year_end:
-        filtered_rows = []
-        for row in rows:
-            date_str = row.get("Date", "").strip()
-            transaction_date = parse_schwab_date(date_str)
+        rows, filtered_count = _filter_by_tax_year(rows, tax_year_end, verbose)
 
-            # Keep row if date is on or before tax year end
-            # Also keep rows with unparseable dates (warnings will be shown if verbose)
-            if transaction_date is None:
-                if verbose and date_str:
-                    print(
-                        f"  ⚠ Warning: Could not parse date '{date_str}', keeping row"
-                    )
-                filtered_rows.append(row)
-            elif transaction_date <= tax_year_end:
-                filtered_rows.append(row)
-            else:
-                stats["filtered_rows"] += 1
-                if verbose:
-                    desc = row.get("Description", "")[:50]
-                    print(f"  Filtered: {date_str} - {desc}...")
-
-        rows = filtered_rows
-        if verbose and stats["filtered_rows"] > 0:
-            end_date = tax_year_end.strftime("%m/%d/%Y")
-            print(
-                f"  Filtered out {stats['filtered_rows']} row(s) "
-                f"after {end_date}"
-            )
-
-    # Process rows
+    # Step 3: Fix missing symbols
+    symbol_tracker = SymbolTracker(mapping)
     for row_num, row in enumerate(rows, start=2):  # start=2 to account for header
-        # Check if symbol is missing
-        symbol = row.get("Symbol", "").strip()
-        action = row.get("Action", "").strip()
+        if not row.get("Symbol", "").strip():
+            symbol_tracker.process_missing_symbol(row, row_num, verbose)
 
-        if not symbol:
-            description = row.get("Description", "").strip()
-
-            # Only track missing symbols for security transactions
-            is_security_transaction = action in SECURITY_ACTIONS
-            if is_security_transaction:
-                stats["missing_symbols"] += 1
-                desc_key = description if description else "(no description)"
-                stats["missing_descriptions"][desc_key] += 1
-
-            # Only generate symbols for security transactions
-            if not is_security_transaction:
-                # Non-security transaction, leave symbol empty
-                continue
-
-            if not description:
-                # No description, can't generate symbol
-                generated_symbol = f"UNKNOWN{row_num}"
-                if verbose:
-                    print(
-                        f"  ⚠ Warning: Row {row_num} has no description, using {generated_symbol}"
-                    )
-            else:
-                # Check if we've already assigned a symbol for this description
-                description_lower = description.lower()
-                if description_lower in description_to_symbol:
-                    # Reuse the same symbol for identical descriptions
-                    generated_symbol = description_to_symbol[description_lower]
-                    stats["generated"] += 1
-                    source = "REUSED"
-                elif description_lower in mapping:
-                    # Try mapping first
-                    generated_symbol = mapping[description_lower]
-                    stats["mapped"] += 1
-                    source = "MAPPED"
-                    # Remember this mapping
-                    description_to_symbol[description_lower] = generated_symbol
-                else:
-                    # Generate synthetic symbol
-                    generated_symbol = generate_symbol_from_description(description)
-
-                    # Handle collisions (only for different descriptions)
-                    symbol_tracker[generated_symbol] += 1
-                    if symbol_tracker[generated_symbol] > 1:
-                        # Append numeric suffix
-                        collision_num = symbol_tracker[generated_symbol] - 1
-                        generated_symbol = f"{generated_symbol}{collision_num}"
-                        if verbose:
-                            print(
-                                f"  ⚠ Warning: Symbol collision, using {generated_symbol}"
-                            )
-
-                    stats["generated"] += 1
-                    source = "GENERATED"
-                    # Remember this description→symbol mapping
-                    description_to_symbol[description_lower] = generated_symbol
-
-                # Track symbol assignment
-                stats["symbol_assignments"][description]["symbol"] = generated_symbol
-                stats["symbol_assignments"][description]["count"] += 1
-
-                # Update row
-                row["Symbol"] = generated_symbol
-
-                # Track change
-                changes.append(
-                    {
-                        "row": row_num,
-                        "description": description,
-                        "symbol": generated_symbol,
-                        "source": source,
-                    }
-                )
-
-                if verbose:
-                    desc_short = (
-                        description[:50] + "..."
-                        if len(description) > 50
-                        else description
-                    )
-                    print(
-                        f"  Row {row_num}: {desc_short} → {generated_symbol} [{source}]"
-                    )
-
-    # Fix rounding errors if requested
+    # Step 4: Fix rounding errors if requested
+    rounding_fixer = RoundingFixer()
     if fix_rounding:
-        rounding_changes = []
+        rounding_fixer.process_rows(rows, verbose)
 
-        for row_num, row in enumerate(rows, start=2):
-            price_str = row.get("Price", "").strip()
-            quantity_str = row.get("Quantity", "").strip()
-            amount_str = row.get("Amount", "").strip()
-            fees_str = row.get("Fees & Comm", "").strip()
+    # Step 5: Write output CSV
+    _write_csv_rows(output_file, headers, rows)
 
-            # Skip if any required field is missing
-            if not price_str or not quantity_str or not amount_str:
-                continue
+    # Step 6: Write logs if requested
+    if write_log:
+        symbol_tracker.write_log(input_file.parent, input_file.stem, verbose)
+        rounding_fixer.write_log(input_file.parent, input_file.stem, verbose)
 
-            try:
-                # Parse values, removing $ and , characters
-                price = float(price_str.replace("$", "").replace(",", ""))
-                quantity = float(quantity_str.replace(",", ""))
-                amount = float(amount_str.replace("$", "").replace(",", ""))
-                fees = (
-                    float(fees_str.replace("$", "").replace(",", ""))
-                    if fees_str
-                    else 0.0
-                )
-
-                # Calculate expected amount (accounting for fees)
-                # For sells (positive amount): quantity × price - fees
-                # For buys (negative amount): -(quantity × price + fees)
-                gross_amount = quantity * price
-                if amount >= 0:
-                    # Sell transaction
-                    calculated_amount = gross_amount - fees
-                else:
-                    # Buy transaction
-                    calculated_amount = -(gross_amount + fees)
-
-                # Check if there's a rounding discrepancy
-                # Only fix small discrepancies (0.01 < diff < 1.00)
-                # Larger differences are likely legitimate (bonds, special pricing, etc.)
-                diff = abs(calculated_amount - amount)
-
-                if 0.01 < diff < 1.00:
-                    # Fix the amount
-                    # Preserve the sign (negative for buys, positive for sells)
-                    sign = "-" if amount < 0 else ""
-                    fixed_amount = f"{sign}${abs(calculated_amount):.2f}"
-
-                    old_amount = row["Amount"]
-                    row["Amount"] = fixed_amount
-
-                    stats["rounding_fixed"] += 1
-
-                    rounding_changes.append(
-                        {
-                            "row": row_num,
-                            "symbol": row.get("Symbol", ""),
-                            "description": row.get("Description", "")[:30],
-                            "old_amount": old_amount,
-                            "new_amount": fixed_amount,
-                            "diff": f"${diff:.3f}",
-                        }
-                    )
-
-                    if verbose:
-                        symbol = row.get("Symbol", "N/A")
-                        print(
-                            f"  Row {row_num}: {symbol} amount {old_amount} → {fixed_amount} (diff: ${diff:.3f})"
-                        )
-
-            except (ValueError, ZeroDivisionError):
-                # Skip rows with invalid numeric data
-                continue
-
-        # Add rounding changes to main changes log if write_log is enabled
-        if write_log and rounding_changes:
-            rounding_log_file = (
-                input_file.parent / f"{input_file.stem}_rounding_fixes.log"
-            )
-            with rounding_log_file.open("w", newline="", encoding="utf-8") as f:
-                log_writer = csv.DictWriter(
-                    f,
-                    fieldnames=[
-                        "Row",
-                        "Symbol",
-                        "Description",
-                        "Old Amount",
-                        "New Amount",
-                        "Difference",
-                    ],
-                )
-                log_writer.writeheader()
-                for change in rounding_changes:
-                    log_writer.writerow(
-                        {
-                            "Row": change["row"],
-                            "Symbol": change["symbol"],
-                            "Description": change["description"],
-                            "Old Amount": change["old_amount"],
-                            "New Amount": change["new_amount"],
-                            "Difference": change["diff"],
-                        }
-                    )
-            if verbose:
-                print(f"  Rounding fixes log written to: {rounding_log_file}")
-
-    # Write output
-    with output_file.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    # Write change log if requested
-    if write_log and changes:
-        log_file = input_file.parent / f"{input_file.stem}_symbol_changes.log"
-        with log_file.open("w", newline="", encoding="utf-8") as f:
-            log_writer = csv.DictWriter(
-                f,
-                fieldnames=["Row", "Original Description", "Assigned Symbol", "Source"],
-            )
-            log_writer.writeheader()
-            for change in changes:
-                log_writer.writerow(
-                    {
-                        "Row": change["row"],
-                        "Original Description": change["description"],
-                        "Assigned Symbol": change["symbol"],
-                        "Source": change["source"],
-                    }
-                )
-        if verbose:
-            print(f"  Change log written to: {log_file}")
-
-    return stats
+    # Return statistics
+    return {
+        "total_rows": total_rows,
+        "filtered_rows": filtered_count,
+        "missing_symbols": symbol_tracker.missing_symbols,
+        "mapped": symbol_tracker.symbols_mapped,
+        "generated": symbol_tracker.symbols_generated,
+        "rounding_fixed": rounding_fixer.fixes_count,
+        "missing_descriptions": symbol_tracker.missing_descriptions,
+        "symbol_assignments": symbol_tracker.symbol_assignment_counts,
+    }
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -668,7 +709,7 @@ Examples:
     parser.add_argument(
         "--fix-rounding",
         action="store_true",
-        help="fix small rounding errors ($0.01-$1.00) where quantity × price ≠ amount",
+        help=f"fix small rounding errors (${MIN_ROUNDING_DIFF:.2f}-${MAX_ROUNDING_DIFF:.2f}) where quantity × price ≠ amount",
     )
 
     parser.add_argument(
@@ -764,7 +805,7 @@ def main() -> int:
             print()
             print("Missing symbols for:")
             for desc, count in stats["missing_descriptions"].items():
-                desc_display = desc[:80] + "..." if len(desc) > 80 else desc
+                desc_display = truncate_text(desc, DESC_LONG)
                 print(f"  • {desc_display} ({count:,} row(s))")
 
     if stats["mapped"] > 0 or stats["generated"] > 0:
@@ -774,7 +815,7 @@ def main() -> int:
         # Show detailed assignments with descriptions and counts
         if stats["symbol_assignments"]:
             for desc, info in stats["symbol_assignments"].items():
-                desc_display = desc[:60] + "..." if len(desc) > 60 else desc
+                desc_display = truncate_text(desc, DESC_MEDIUM)
                 symbol = info["symbol"]
                 count = info["count"]
                 print(f"  • {desc_display} → {symbol} ({count:,} row(s))")

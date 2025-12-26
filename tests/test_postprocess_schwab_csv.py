@@ -262,18 +262,18 @@ class TestSymbolFixing:
             writer.writeheader()
             writer.writerow({
                 "Date": "01/15/2024",
-                "Action": "Credit Interest",
+                "Action": "Buy",  # Security action
                 "Symbol": "",  # Missing
-                "Description": "SCHWAB1 INT 01/01-01/31",
-                "Price": "",
-                "Quantity": "",
-                "Fees & Comm": "",
-                "Amount": "$50.00",
+                "Description": "ISHARES EDGE MSCI WORLD",
+                "Price": "$100.00",
+                "Quantity": "10",
+                "Fees & Comm": "$1.00",
+                "Amount": "-$1,001.00",
             })
             input_file = Path(f.name)
 
         output_file = input_file.parent / f"{input_file.stem}_output.csv"
-        mapping = {"schwab1 int 01/01-01/31": "SCHINT"}
+        mapping = {"ishares edge msci world": "IEMW"}
 
         try:
             stats = process_csv(
@@ -293,7 +293,7 @@ class TestSymbolFixing:
             with output_file.open() as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
-                assert rows[0]["Symbol"] == "SCHINT"
+                assert rows[0]["Symbol"] == "IEMW"
 
         finally:
             input_file.unlink()
@@ -313,13 +313,13 @@ class TestSymbolFixing:
             writer.writeheader()
             writer.writerow({
                 "Date": "01/15/2024",
-                "Action": "Qualified Dividend",
+                "Action": "Sell",  # Security action
                 "Symbol": "",  # Missing
                 "Description": "APPLE INC",
-                "Price": "",
-                "Quantity": "",
-                "Fees & Comm": "",
-                "Amount": "$100.00",
+                "Price": "$150.00",
+                "Quantity": "10",
+                "Fees & Comm": "$1.00",
+                "Amount": "$1,499.00",
             })
             input_file = Path(f.name)
 

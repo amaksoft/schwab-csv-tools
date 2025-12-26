@@ -17,12 +17,20 @@ import sys
 from pathlib import Path
 
 
-def find_script_in_same_env(script_name: str) -> str:
-    """Find a script in the same Python environment.
+def _find_executable_in_env(script_name: str) -> Path | None:
+    """Find an executable in the same Python environment.
 
-    Searches in the same locations as find_cgt_calc() but for any script name.
-    Returns the full path if found, otherwise returns just the script name
-    (which will rely on PATH).
+    Searches in the following order:
+    1. In the same directory as the Python executable (Scripts/bin folder)
+    2. On Windows, check Scripts directory with .exe extension
+    3. In the user site-packages bin directory (for --user installs)
+    4. In PATH using shutil.which()
+
+    Args:
+        script_name: Name of the executable to find
+
+    Returns:
+        Path to the executable if found, None otherwise
     """
     python_exe = Path(sys.executable)
     bin_dir = python_exe.parent
@@ -30,52 +38,13 @@ def find_script_in_same_env(script_name: str) -> str:
     # Check in the same directory as Python
     candidate = bin_dir / script_name
     if candidate.exists() and candidate.is_file():
-        return str(candidate)
+        return candidate
 
-    # On Windows, might be in Scripts directory
+    # On Windows, might be in Scripts directory with .exe extension
     if bin_dir.name == "Scripts":
-        candidate = bin_dir / f"{script_name}.exe"
-        if candidate.exists() and candidate.is_file():
-            return str(candidate)
-
-    # Check user site-packages bin directory (for --user installs)
-    try:
-        import site
-
-        user_base = site.getuserbase()
-        if user_base:
-            user_bin = Path(user_base) / "bin" / script_name
-            if user_bin.exists() and user_bin.is_file():
-                return str(user_bin)
-    except (ImportError, AttributeError):
-        pass
-
-    # Fall back to just the script name (rely on PATH)
-    return script_name
-
-
-def find_cgt_calc() -> Path | None:
-    """Find cgt-calc executable in the same Python environment.
-
-    Searches in the following order:
-    1. In the same directory as the Python executable (Scripts/bin folder)
-    2. In the user site-packages bin directory (for --user installs)
-    3. In PATH using shutil.which()
-    """
-    # First, try to find it in the same Python environment
-    python_exe = Path(sys.executable)
-    bin_dir = python_exe.parent
-
-    # Check in the same directory as Python
-    cgt_calc_candidate = bin_dir / "cgt-calc"
-    if cgt_calc_candidate.exists() and cgt_calc_candidate.is_file():
-        return cgt_calc_candidate
-
-    # On Windows, might be in Scripts directory
-    if bin_dir.name == "Scripts":
-        cgt_calc_candidate = bin_dir / "cgt-calc.exe"
-        if cgt_calc_candidate.exists() and cgt_calc_candidate.is_file():
-            return cgt_calc_candidate
+        candidate_exe = bin_dir / f"{script_name}.exe"
+        if candidate_exe.exists() and candidate_exe.is_file():
+            return candidate_exe
 
     # Check user site-packages bin directory (for --user installs)
     # This is typically ~/Library/Python/X.Y/bin on macOS, ~/.local/bin on Linux
@@ -84,15 +53,40 @@ def find_cgt_calc() -> Path | None:
 
         user_base = site.getuserbase()
         if user_base:
-            user_bin = Path(user_base) / "bin" / "cgt-calc"
+            user_bin = Path(user_base) / "bin" / script_name
             if user_bin.exists() and user_bin.is_file():
                 return user_bin
     except (ImportError, AttributeError):
         pass
 
     # Fall back to searching PATH
-    cgt_calc_path = shutil.which("cgt-calc")
-    return Path(cgt_calc_path) if cgt_calc_path else None
+    path_result = shutil.which(script_name)
+    return Path(path_result) if path_result else None
+
+
+def find_script_in_same_env(script_name: str) -> str:
+    """Find a script in the same Python environment.
+
+    Returns the full path if found, otherwise returns just the script name
+    (which will rely on PATH).
+
+    Args:
+        script_name: Name of the script to find
+
+    Returns:
+        Full path to script or just script name as fallback
+    """
+    result = _find_executable_in_env(script_name)
+    return str(result) if result else script_name
+
+
+def find_cgt_calc() -> Path | None:
+    """Find cgt-calc executable in the same Python environment.
+
+    Returns:
+        Path to cgt-calc executable or None if not found
+    """
+    return _find_executable_in_env("cgt-calc")
 
 
 def run_command(cmd: list[str], description: str) -> None:

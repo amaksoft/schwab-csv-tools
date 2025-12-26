@@ -21,6 +21,9 @@ import sys
 from pathlib import Path
 from typing import Final
 
+# Import shared utilities from common module
+from .common import ValidationError
+
 # Constants
 EXPECTED_COLUMN_COUNT: Final = 15
 REQUIRED_HEADERS: Final[set[str]] = {"Date", "Symbol", "FairMarketValuePrice"}
@@ -31,12 +34,6 @@ UPPER_ROW_COLUMNS: Final[set[int]] = {0, 1, 2, 3, 4}  # Date, Action, Symbol, De
 # Lower row contains these indices
 LOWER_ROW_COLUMNS: Final[set[int]] = {8, 9, 10, 11, 12, 13, 14}  # AwardDate onwards
 # Indices 5, 6, 7 are empty in both rows
-
-
-class ValidationError(Exception):
-    """CSV validation error."""
-
-    pass
 
 
 def validate_schwab_awards_csv(
