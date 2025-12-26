@@ -15,8 +15,8 @@ from pathlib import Path
 
 # Import shared utilities from common module
 from .common import (
-    MIN_COLUMNS,
     MAX_COLUMNS,
+    MIN_COLUMNS,
     REQUIRED_HEADERS,
     ValidationError,
     extract_account_number,
@@ -938,7 +938,7 @@ def main() -> int:
                 print(f"    {fname}")
             print("  Skipping account verification for journal transfers")
             print()
-        account_numbers = None  # Disable account verification
+        account_numbers = None  # type: ignore[assignment]  # Disable account verification
     else:
         if verbose:
             print(f"Detected account numbers: {sorted(account_numbers)}")

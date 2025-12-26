@@ -14,16 +14,16 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Import shared utilities from common module
 from .common import (
     DESC_LONG,
     DESC_MEDIUM,
     DESC_SHORT,
-    MAX_ROUNDING_DIFF,
-    MAX_SYMBOL_LENGTH,
-    MIN_COLUMNS,
     MAX_COLUMNS,
+    MAX_ROUNDING_DIFF,
+    MIN_COLUMNS,
     MIN_ROUNDING_DIFF,
     REQUIRED_HEADERS,
     SECURITY_ACTIONS,
@@ -102,7 +102,8 @@ def load_mapping_file(filepath: Path, verbose: bool = False) -> dict[str, str]:
 
             if len(row) < 2:
                 raise ValidationError(
-                    f"Invalid mapping file at line {line_num}: expected 2 columns, got {len(row)}"
+                    f"Invalid mapping file at line {line_num}: "
+                    f"expected 2 columns, got {len(row)}"
                 )
 
             description = row[desc_index].strip()
@@ -129,7 +130,8 @@ def load_mapping_file(filepath: Path, verbose: bool = False) -> dict[str, str]:
         print(f"  Loaded {len(mappings)} mapping(s)")
         if duplicates:
             print(
-                f"  ⚠ Warning: {len(duplicates)} duplicate description(s) in mapping file"
+                f"  ⚠ Warning: {len(duplicates)} duplicate description(s) "
+                f"in mapping file"
             )
             for line_num, desc in duplicates[:3]:  # Show first 3
                 print(f"    Line {line_num}: {desc[:50]}...")
@@ -167,7 +169,8 @@ def validate_schwab_csv(filepath: Path, verbose: bool = False) -> list[str]:
         # Validate column count
         if len(headers) < MIN_COLUMNS or len(headers) > MAX_COLUMNS:
             raise ValidationError(
-                f"Expected {MIN_COLUMNS}-{MAX_COLUMNS} columns, got {len(headers)}: {filepath}"
+                f"Expected {MIN_COLUMNS}-{MAX_COLUMNS} columns, "
+                f"got {len(headers)}: {filepath}"
             )
 
         # Validate required headers
@@ -243,7 +246,8 @@ class SymbolTracker:
             source = "FALLBACK"
             if verbose:
                 print(
-                    f"  ⚠ Warning: Row {row_num} has no description, using {generated_symbol}"
+                    f"  ⚠ Warning: Row {row_num} has no description, "
+                    f"using {generated_symbol}"
                 )
         else:
             generated_symbol, source = self._generate_or_lookup_symbol(
@@ -255,7 +259,9 @@ class SymbolTracker:
 
         # Track assignment
         self.symbol_assignment_counts[description]["symbol"] = generated_symbol
-        self.symbol_assignment_counts[description]["count"] += 1
+        count = self.symbol_assignment_counts[description]["count"]
+        assert isinstance(count, int)
+        self.symbol_assignment_counts[description]["count"] = count + 1
 
         # Track change for logging
         self.assignments.append(
@@ -316,7 +322,9 @@ class SymbolTracker:
         self.description_to_symbol[description_lower] = symbol
         return symbol, "GENERATED"
 
-    def write_log(self, output_dir: Path, input_stem: str, verbose: bool = False) -> None:
+    def write_log(
+        self, output_dir: Path, input_stem: str, verbose: bool = False
+    ) -> None:
         """Write symbol assignment log file.
 
         Args:
@@ -350,13 +358,11 @@ class SymbolTracker:
 class RoundingFixer:
     """Encapsulates rounding error detection and fixing logic."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the rounding fixer."""
         self.fixes: list[dict[str, str | int]] = []
 
-    def process_rows(
-        self, rows: list[dict[str, str]], verbose: bool = False
-    ) -> None:
+    def process_rows(self, rows: list[dict[str, str]], verbose: bool = False) -> None:
         """Fix rounding errors in all rows.
 
         Args:
@@ -404,7 +410,8 @@ class RoundingFixer:
                 calculated_amount = -(gross_amount + fees)
 
             # Check if there's a rounding discrepancy
-            # Only fix small discrepancies (MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF)
+            # Only fix small discrepancies
+            # (MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF)
             diff = abs(calculated_amount - amount)
 
             if MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF:
@@ -430,14 +437,17 @@ class RoundingFixer:
                 if verbose:
                     symbol = row.get("Symbol", "N/A")
                     print(
-                        f"  Row {row_num}: {symbol} amount {old_amount} → {fixed_amount} (diff: ${diff:.3f})"
+                        f"  Row {row_num}: {symbol} amount {old_amount} → "
+                        f"{fixed_amount} (diff: ${diff:.3f})"
                     )
 
         except (ValueError, ZeroDivisionError):
             # Skip rows with invalid numeric data
             pass
 
-    def write_log(self, output_dir: Path, input_stem: str, verbose: bool = False) -> None:
+    def write_log(
+        self, output_dir: Path, input_stem: str, verbose: bool = False
+    ) -> None:
         """Write rounding fixes log file.
 
         Args:
@@ -484,6 +494,19 @@ class RoundingFixer:
             Number of rounding fixes
         """
         return len(self.fixes)
+
+    def get_affected_symbols(self) -> dict[str, int]:
+        """Get symbols that had rounding fixes with their counts.
+
+        Returns:
+            Dict mapping symbol to number of rounding fixes for that symbol
+        """
+        symbol_counts: dict[str, int] = defaultdict(int)
+        for fix in self.fixes:
+            symbol = fix["symbol"]
+            if symbol:
+                symbol_counts[str(symbol)] += 1
+        return dict(symbol_counts)
 
 
 # ============================================================================
@@ -579,7 +602,7 @@ def process_csv(
     write_log: bool = False,
     fix_rounding: bool = False,
     tax_year_end: datetime | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Process CSV and fix missing symbols and rounding errors.
 
     Args:
@@ -588,8 +611,9 @@ def process_csv(
         mapping: Description → symbol mapping dict
         verbose: Enable verbose output
         write_log: Write change log file
-        fix_rounding: Fix small rounding errors (MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF)
-            where quantity × price ≠ amount
+        fix_rounding: Fix small rounding errors
+            (MIN_ROUNDING_DIFF < diff < MAX_ROUNDING_DIFF)
+            where quantity * price ≠ amount
         tax_year_end: Optional UK tax year end date; filter out
             transactions after this date
 
@@ -636,6 +660,7 @@ def process_csv(
         "mapped": symbol_tracker.symbols_mapped,
         "generated": symbol_tracker.symbols_generated,
         "rounding_fixed": rounding_fixer.fixes_count,
+        "rounding_affected_symbols": rounding_fixer.get_affected_symbols(),
         "missing_descriptions": symbol_tracker.missing_descriptions,
         "symbol_assignments": symbol_tracker.symbol_assignment_counts,
     }
@@ -709,7 +734,11 @@ Examples:
     parser.add_argument(
         "--fix-rounding",
         action="store_true",
-        help=f"fix small rounding errors (${MIN_ROUNDING_DIFF:.2f}-${MAX_ROUNDING_DIFF:.2f}) where quantity × price ≠ amount",
+        help=(
+            f"fix small rounding errors "
+            f"(${MIN_ROUNDING_DIFF:.2f}-${MAX_ROUNDING_DIFF:.2f}) "
+            f"where quantity * price ≠ amount"
+        ),
     )
 
     parser.add_argument(
@@ -769,10 +798,7 @@ def main() -> int:
         if verbose:
             end_date = tax_year_end.strftime("%m/%d/%Y")
             print()
-            print(
-                f"Tax year {args.tax_year}: filtering transactions "
-                f"after {end_date}"
-            )
+            print(f"Tax year {args.tax_year}: filtering transactions after {end_date}")
 
     # Process CSV
     if verbose:
@@ -825,7 +851,9 @@ def main() -> int:
         if stats["mapped"] > 0:
             print(f"  Total mapped: {stats['mapped']:,} symbol(s) from mapping file")
         if stats["generated"] > 0:
-            print(f"  Total generated: {stats['generated']:,} symbol(s) from descriptions")
+            print(
+                f"  Total generated: {stats['generated']:,} symbol(s) from descriptions"
+            )
 
     print()
     print("Statistics:")
@@ -837,6 +865,14 @@ def main() -> int:
     print(f"  Symbols mapped: {stats['mapped']:,}")
     print(f"  Symbols generated: {stats['generated']:,}")
     print(f"  Rounding errors fixed: {stats['rounding_fixed']:,}")
+
+    # Show symbols affected by rounding fixes if any
+    if stats["rounding_fixed"] > 0 and stats["rounding_affected_symbols"]:
+        print()
+        print("Rounding errors fixed for:")
+        for symbol, count in sorted(stats["rounding_affected_symbols"].items()):
+            print(f"  • {symbol} ({count:,} row(s))")
+
     print(f"  Output: {output_path}")
 
     return 0
