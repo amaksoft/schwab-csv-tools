@@ -56,8 +56,8 @@ class TestAwardsCSVValidation:
     def test_invalid_column_count(self):
         """Test validation fails with wrong column count."""
         from schwab_csv_tools.merge_awards import (
-            validate_schwab_awards_csv,
             ValidationError,
+            validate_schwab_awards_csv,
         )
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
@@ -78,8 +78,8 @@ class TestAwardsCSVValidation:
     def test_odd_line_count(self):
         """Test validation fails with odd line count (unpaired rows)."""
         from schwab_csv_tools.merge_awards import (
-            validate_schwab_awards_csv,
             ValidationError,
+            validate_schwab_awards_csv,
         )
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
@@ -106,8 +106,8 @@ class TestAwardsCSVValidation:
     def test_missing_required_headers(self):
         """Test validation fails with missing required headers."""
         from schwab_csv_tools.merge_awards import (
-            validate_schwab_awards_csv,
             ValidationError,
+            validate_schwab_awards_csv,
         )
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
@@ -156,8 +156,8 @@ class TestRowPairMerging:
     def test_merge_row_pair_conflict(self):
         """Test merging fails when both rows have value in same column."""
         from schwab_csv_tools.merge_awards import (
-            merge_row_pair,
             ValidationError,
+            merge_row_pair,
         )
 
         upper = [

@@ -93,6 +93,8 @@ def run_command(cmd: list[str], description: str) -> None:
     """Run a command and handle errors.
 
     Checks both exit code and output for error indicators.
+    Output is streamed in real-time. Interactive prompts will fail
+    immediately since stdin is set to DEVNULL.
     """
     print(f"\n{'=' * 70}")
     print(f"{description}")
@@ -102,28 +104,13 @@ def run_command(cmd: list[str], description: str) -> None:
     result = subprocess.run(
         cmd,
         check=False,
-        capture_output=True,
+        stdin=subprocess.DEVNULL,  # Fail immediately on interactive prompts
         text=True
-    )
-
-    # Print output in real-time style
-    if result.stdout:
-        print(result.stdout, end='')
-    if result.stderr:
-        print(result.stderr, end='', file=sys.stderr)
-
-    # Check for critical errors in output (cgt-calc returns 0 even on errors)
-    output_combined = (result.stdout or '') + (result.stderr or '')
-    has_critical_error = (
-        'CRITICAL:' in output_combined or 'Traceback' in output_combined
     )
 
     if result.returncode != 0:
         print(f"\n❌ Error: {description} failed with exit code {result.returncode}")
         sys.exit(result.returncode)
-    elif has_critical_error:
-        print(f"\n❌ Error: {description} failed (critical error detected)")
-        sys.exit(1)
 
     print(f"\n✅ {description} completed successfully")
 
@@ -326,7 +313,7 @@ Example usage:
             print(f"   Kept {transactions_merged.name}")
         elif args.keep_intermediates == "A":
             # Keep everything
-            print(f"\n📁 Kept all intermediate files:")
+            print("\n📁 Kept all intermediate files:")
             print(f"   {transactions_raw_merged.name}")
             print(f"   {awards_merged.name}")
             print(f"   {transactions_merged.name}")

@@ -48,8 +48,8 @@ class TestCSVValidation:
     def test_missing_required_headers(self):
         """Test validation fails with missing required headers."""
         from schwab_csv_tools.merge_transactions import (
-            validate_schwab_csv,
             ValidationError,
+            validate_schwab_csv,
         )
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
@@ -70,8 +70,8 @@ class TestCSVValidation:
     def test_invalid_column_count(self):
         """Test validation fails with wrong column count."""
         from schwab_csv_tools.merge_transactions import (
-            validate_schwab_csv,
             ValidationError,
+            validate_schwab_csv,
         )
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
@@ -93,9 +93,9 @@ class TestTransactionMerging:
     def test_merge_two_files(self):
         """Test merging two transaction files."""
         from schwab_csv_tools.merge_transactions import (
-            validate_schwab_csv,
             read_schwab_csv,
             remove_duplicates,
+            validate_schwab_csv,
         )
 
         # Create first file
@@ -187,8 +187,8 @@ class TestJournaledSharesMatching:
     def test_unmatched_journaled_shares_error(self):
         """Test error on unmatched Journaled Shares."""
         from schwab_csv_tools.merge_transactions import (
-            filter_journaled_shares,
             ValidationError,
+            filter_journaled_shares,
         )
 
         headers = [

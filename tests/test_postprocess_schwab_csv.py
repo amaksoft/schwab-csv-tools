@@ -3,9 +3,6 @@
 import csv
 import tempfile
 from pathlib import Path
-import subprocess
-
-import pytest
 
 
 class TestSymbolGeneration:
