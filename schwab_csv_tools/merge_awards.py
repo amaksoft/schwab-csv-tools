@@ -462,6 +462,9 @@ def main() -> int:
     # PHASE 2: Read and merge pairs
     all_merged_rows = []
 
+    # Calculate max filename width for alignment
+    max_name_width = max(len(f.name) for f in input_files)
+
     for i, filepath in enumerate(input_files, 1):
         if verbose:
             print(f"Reading file {i}: {filepath}")
@@ -470,7 +473,9 @@ def main() -> int:
             merged_rows = read_schwab_awards_csv(filepath, reference_headers, verbose)
             all_merged_rows.extend(merged_rows)
 
-            print(f"✓ File {i}: {len(merged_rows)} award(s)")
+            # Print with aligned counts
+            filename = filepath.name
+            print(f"✓ {filename:<{max_name_width}}  {len(merged_rows):>6,} award(s)")
         except ValidationError as e:
             print(f"✗ Error: {e}", file=sys.stderr)
             return 1

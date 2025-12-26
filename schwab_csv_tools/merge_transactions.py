@@ -889,6 +889,9 @@ def main() -> int:
     all_rows = []
     file_counts = []
 
+    # Calculate max filename width for alignment
+    max_name_width = max(len(f.name) for f in input_files)
+
     for i, filepath in enumerate(input_files, 1):
         if verbose:
             print(f"Reading file {i}: {filepath}")
@@ -897,8 +900,9 @@ def main() -> int:
         all_rows.extend(rows)
         file_counts.append(len(rows))
 
-        symbol = "✓"
-        print(f"{symbol} File {i}: {len(rows):,} transaction(s)")
+        # Print with aligned counts
+        filename = filepath.name
+        print(f"✓ {filename:<{max_name_width}}  {len(rows):>6,} transaction(s)")
 
         if verbose and list(file_headers) != reference_headers:
             print(f"  (Remapped from: {file_headers})")
