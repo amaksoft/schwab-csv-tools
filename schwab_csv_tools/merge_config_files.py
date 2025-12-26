@@ -114,8 +114,60 @@ def merge_spin_offs(
         print(f"✓ Merged {len(spin_offs)} spin-off(s)")
 
 
-def main() -> None:
-    """Main entry point for command-line usage."""
+def main_initial_prices() -> None:
+    """CLI entry point for merge-initial-prices command."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Merge multiple initial_prices.csv files for cgt-calc"
+    )
+    parser.add_argument(
+        "input_files", nargs="+", type=Path, help="Input initial_prices.csv files"
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, required=True, help="Output merged CSV file"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed processing info"
+    )
+
+    args = parser.parse_args()
+
+    try:
+        merge_initial_prices(args.input_files, args.output, args.verbose)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main_spin_offs() -> None:
+    """CLI entry point for merge-spin-offs command."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Merge multiple spin_offs.csv files for cgt-calc"
+    )
+    parser.add_argument(
+        "input_files", nargs="+", type=Path, help="Input spin_offs.csv files"
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, required=True, help="Output merged CSV file"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed processing info"
+    )
+
+    args = parser.parse_args()
+
+    try:
+        merge_spin_offs(args.input_files, args.output, args.verbose)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    # For backwards compatibility, allow running as a generic tool
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -147,6 +199,3 @@ def main() -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-
-if __name__ == "__main__":
-    main()

@@ -33,6 +33,8 @@ dependencies = []
 [project.scripts]
 merge-schwab-csv = "schwab_csv_tools.merge_transactions:main"
 merge-schwab-awards = "schwab_csv_tools.merge_awards:main"
+merge-initial-prices = "schwab_csv_tools.merge_config_files:main_initial_prices"
+merge-spin-offs = "schwab_csv_tools.merge_config_files:main_spin_offs"
 postprocess-schwab-csv = "schwab_csv_tools.postprocess:main"
 cgt-calc-wrapper = "schwab_csv_tools.cgt_wrapper:main"
 
