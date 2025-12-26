@@ -299,27 +299,60 @@ def parse_quantity(qty_str: str) -> float | None:
         return None
 
 
+def extract_account_number(filename: str) -> str | None:
+    """Extract account number from Schwab CSV filename.
+
+    Looks for patterns like:
+    - Individual_XXX157_Transactions_... -> 157
+    - SCHWAB1_ONE_INTL_XXX964_Transactions_... -> 964
+
+    Args:
+        filename: CSV filename (not full path)
+
+    Returns:
+        Account number (last 3-4 digits) or None if not found
+    """
+    import re
+
+    # Pattern: XXX followed by 3-4 digits
+    match = re.search(r'XXX(\d{3,4})', filename)
+    if match:
+        return match.group(1)
+
+    return None
+
+
 def filter_journaled_shares(
     rows: list[tuple[str, ...]],
     headers: list[str],
     keep_unmatched: bool,
+    account_numbers: set[str] | None = None,
     verbose: bool = False
 ) -> list[tuple[str, ...]]:
-    """Filter out matched Journaled Shares transactions.
+    """Filter out matched Journaled Shares and Journal transactions.
 
-    Journaled Shares represent internal transfers between accounts.
+    Journaled Shares and Journal transactions represent internal transfers between accounts.
     When merging multiple account files, matched pairs should be removed.
 
-    Matching criteria:
+    Matching criteria for Journaled Shares:
+    - Action = "Journaled Shares"
     - Same Symbol
     - Same Date
     - Same Price
     - Opposite Quantities (one positive, one negative, same absolute value)
 
+    Matching criteria for Journal transfers:
+    - Action = "Journal"
+    - Same Date
+    - One description contains "JOURNAL TO", other contains "JOURNAL FRM"
+    - Opposite Amounts (one positive, one negative, same absolute value)
+    - If account_numbers provided: verify the account numbers in descriptions match the input files
+
     Args:
         rows: All transaction rows
         headers: Column headers
         keep_unmatched: If False, error on unmatched journaled shares
+        account_numbers: Set of account numbers from input files (for verification)
         verbose: Print matching details
 
     Returns:
@@ -334,94 +367,283 @@ def filter_journaled_shares(
     date_idx = headers.index("Date")
     price_idx = headers.index("Price")
     quantity_idx = headers.index("Quantity")
+    description_idx = headers.index("Description")
+    amount_idx = headers.index("Amount")
 
-    # Separate journaled shares from other rows
+    # Separate journaled shares and journal transfers from other rows
     journaled_rows = []
+    journal_rows = []
     other_rows = []
 
     for row in rows:
         if row[action_idx] == "Journaled Shares":
             journaled_rows.append(row)
+        elif row[action_idx] == "Journal":
+            journal_rows.append(row)
         else:
             other_rows.append(row)
 
-    if not journaled_rows:
-        return rows  # No journaled shares, return as-is
+    if not journaled_rows and not journal_rows:
+        return rows  # No transfers to process, return as-is
 
-    if verbose:
-        print(f"Found {len(journaled_rows)} 'Journaled Shares' transaction(s)")
+    # Process Journaled Shares
+    journaled_matched_indices = set()
+    journaled_pairs_matched = 0
 
-    # Find and remove matching pairs
-    matched_indices = set()
+    if journaled_rows:
+        if verbose:
+            print(f"Found {len(journaled_rows)} 'Journaled Shares' transaction(s)")
 
-    for i, row1 in enumerate(journaled_rows):
-        if i in matched_indices:
-            continue  # Already matched
-
-        symbol1 = row1[symbol_idx]
-        date1 = row1[date_idx]
-        price1 = row1[price_idx]
-        qty1 = parse_quantity(row1[quantity_idx])
-
-        if qty1 is None:
-            continue  # Skip if quantity is missing
-
-        # Search for matching pair
-        for j, row2 in enumerate(journaled_rows[i + 1:], start=i + 1):
-            if j in matched_indices:
+        # Find and remove matching pairs
+        for i, row1 in enumerate(journaled_rows):
+            if i in journaled_matched_indices:
                 continue  # Already matched
 
-            symbol2 = row2[symbol_idx]
-            date2 = row2[date_idx]
-            price2 = row2[price_idx]
-            qty2 = parse_quantity(row2[quantity_idx])
+            symbol1 = row1[symbol_idx]
+            date1 = row1[date_idx]
+            price1 = row1[price_idx]
+            qty1 = parse_quantity(row1[quantity_idx])
 
-            if qty2 is None:
+            if qty1 is None:
                 continue  # Skip if quantity is missing
 
-            # Check if they match
-            if (
-                symbol1 == symbol2
-                and date1 == date2
-                and price1 == price2
-                and abs(qty1 + qty2) < 0.01  # Opposite quantities (sum to ~0)
-            ):
-                # Found a matching pair!
-                matched_indices.add(i)
-                matched_indices.add(j)
+            # Search for matching pair
+            for j, row2 in enumerate(journaled_rows[i + 1:], start=i + 1):
+                if j in journaled_matched_indices:
+                    continue  # Already matched
 
-                if verbose:
-                    print(f"  Matched pair: {symbol1} on {date1}, qty {qty1} and {qty2}")
-                break  # Found match for row1, move to next
+                symbol2 = row2[symbol_idx]
+                date2 = row2[date_idx]
+                price2 = row2[price_idx]
+                qty2 = parse_quantity(row2[quantity_idx])
 
-    # Check for unmatched journaled shares
-    unmatched_indices = set(range(len(journaled_rows))) - matched_indices
+                if qty2 is None:
+                    continue  # Skip if quantity is missing
 
-    if unmatched_indices:
-        unmatched_count = len(unmatched_indices)
-        if not keep_unmatched:
-            # Build error message with details
-            error_msg = f"{unmatched_count} unmatched 'Journaled Shares' found "
+                # Check if they match
+                if (
+                    symbol1 == symbol2
+                    and date1 == date2
+                    and price1 == price2
+                    and abs(qty1 + qty2) < 0.01  # Opposite quantities (sum to ~0)
+                ):
+                    # Found a matching pair!
+                    journaled_matched_indices.add(i)
+                    journaled_matched_indices.add(j)
+
+                    if verbose:
+                        print(f"  Matched pair: {symbol1} on {date1}, qty {qty1} and {qty2}")
+                    break  # Found match for row1, move to next
+
+        journaled_pairs_matched = len(journaled_matched_indices) // 2
+
+    # Process Journal transfers
+    journal_matched_indices = set()
+    journal_pairs_matched = 0
+
+    if journal_rows:
+        if verbose:
+            print(f"Found {len(journal_rows)} 'Journal' transaction(s)")
+
+        # Helper function to parse amount
+        def parse_amount(amt_str: str) -> float | None:
+            if not amt_str or amt_str.strip() == "":
+                return None
+            # Remove $ and commas, convert to float
+            try:
+                return float(amt_str.replace("$", "").replace(",", ""))
+            except ValueError:
+                return None
+
+        # Helper function to extract account number from journal description
+        def extract_journal_account(desc: str) -> str | None:
+            """Extract account number from JOURNAL TO/FRM description.
+
+            Examples:
+              "JOURNAL TO ...964" -> "964"
+              "JOURNAL FRM ...157" -> "157"
+            """
+            import re
+            # Look for pattern like "...964" or "...157"
+            match = re.search(r'\.{3}(\d{3,4})', desc)
+            if match:
+                return match.group(1)
+            return None
+
+        # Find and remove matching pairs
+        for i, row1 in enumerate(journal_rows):
+            if i in journal_matched_indices:
+                continue  # Already matched
+
+            date1 = row1[date_idx]
+            desc1 = row1[description_idx].upper()
+            amt1 = parse_amount(row1[amount_idx])
+
+            if amt1 is None:
+                continue  # Skip if amount is missing
+
+            # Check if this is a TO or FRM transaction
+            is_to = "JOURNAL TO" in desc1
+            is_frm = "JOURNAL FRM" in desc1
+
+            if not (is_to or is_frm):
+                continue  # Not a TO/FRM journal
+
+            # Extract account numbers from description if account verification is enabled
+            acct1 = extract_journal_account(desc1) if account_numbers else None
+
+            # Search for matching pair
+            for j, row2 in enumerate(journal_rows[i + 1:], start=i + 1):
+                if j in journal_matched_indices:
+                    continue  # Already matched
+
+                date2 = row2[date_idx]
+                desc2 = row2[description_idx].upper()
+                amt2 = parse_amount(row2[amount_idx])
+
+                if amt2 is None:
+                    continue  # Skip if amount is missing
+
+                # Check if dates match and descriptions are opposite types
+                if date1 == date2:
+                    # One should be TO and the other FRM
+                    if is_to and "JOURNAL FRM" in desc2:
+                        # Check if amounts are opposite
+                        if abs(amt1 + amt2) < 0.01:  # Sum to ~0
+                            # If account numbers are available, verify they match our input files
+                            if account_numbers:
+                                acct2 = extract_journal_account(desc2)
+                                # Both accounts should be in our input files
+                                if acct1 and acct2:
+                                    if acct1 not in account_numbers or acct2 not in account_numbers:
+                                        if verbose:
+                                            print(f"  Skipping Journal pair on {date1}: accounts {acct1}, {acct2} not in input files ({account_numbers})")
+                                        continue  # Skip this pair - accounts don't match input files
+
+                            journal_matched_indices.add(i)
+                            journal_matched_indices.add(j)
+                            if verbose:
+                                if account_numbers and acct1 and acct2:
+                                    print(f"  Matched Journal pair on {date1}, amounts {amt1} and {amt2}, accounts {acct1}↔{acct2}")
+                                else:
+                                    print(f"  Matched Journal pair on {date1}, amounts {amt1} and {amt2}")
+                            break
+                    elif is_frm and "JOURNAL TO" in desc2:
+                        # Check if amounts are opposite
+                        if abs(amt1 + amt2) < 0.01:  # Sum to ~0
+                            # If account numbers are available, verify they match our input files
+                            if account_numbers:
+                                acct2 = extract_journal_account(desc2)
+                                # Both accounts should be in our input files
+                                if acct1 and acct2:
+                                    if acct1 not in account_numbers or acct2 not in account_numbers:
+                                        if verbose:
+                                            print(f"  Skipping Journal pair on {date1}: accounts {acct1}, {acct2} not in input files ({account_numbers})")
+                                        continue  # Skip this pair - accounts don't match input files
+
+                            journal_matched_indices.add(i)
+                            journal_matched_indices.add(j)
+                            if verbose:
+                                if account_numbers and acct1 and acct2:
+                                    print(f"  Matched Journal pair on {date1}, amounts {amt1} and {amt2}, accounts {acct1}↔{acct2}")
+                                else:
+                                    print(f"  Matched Journal pair on {date1}, amounts {amt1} and {amt2}")
+                            break
+
+        journal_pairs_matched = len(journal_matched_indices) // 2
+
+    # Check for unmatched journaled shares and journals
+    journaled_unmatched = set(range(len(journaled_rows))) - journaled_matched_indices
+    journal_unmatched = set(range(len(journal_rows))) - journal_matched_indices
+
+    # Helper function to extract account number (reuse from above if needed)
+    def extract_journal_account(desc: str) -> str | None:
+        """Extract account number from JOURNAL TO/FRM description."""
+        import re
+        match = re.search(r'\.{3}(\d{3,4})', desc)
+        if match:
+            return match.group(1)
+        return None
+
+    # If we have account numbers, check if unmatched journals involve our accounts
+    if account_numbers and journal_unmatched and not keep_unmatched:
+        problematic_journals = []
+        for idx in journal_unmatched:
+            row = journal_rows[idx]
+            desc = row[description_idx]
+            acct = extract_journal_account(desc)
+            # If this journal mentions one of our accounts, it's problematic
+            if acct and acct in account_numbers:
+                problematic_journals.append((idx, row, acct))
+
+        if problematic_journals:
+            # Build error message
+            error_msg = f"{len(problematic_journals)} unmatched journal transfer(s) found involving accounts {sorted(account_numbers)} "
             error_msg += "(use --keep-unmatched-transfers to keep them):\n"
-            for idx in sorted(unmatched_indices):
-                row = journaled_rows[idx]
-                error_msg += f"  {row[date_idx]}, {row[symbol_idx]}, qty {row[quantity_idx]}\n"
+            for idx, row, acct in problematic_journals:
+                error_msg += f"  {row[date_idx]}, {row[description_idx]}, amt {row[amount_idx]}, account {acct}\n"
             raise ValidationError(error_msg.rstrip())
 
-        if verbose:
-            print(f"  Keeping {unmatched_count} unmatched 'Journaled Shares'")
+    # Original unmatched checking (for cases without account verification or for journaled shares)
+    total_unmatched = len(journaled_unmatched) + len(journal_unmatched)
 
-    # Build result: other rows + unmatched journaled shares (if keeping)
+    if total_unmatched > 0 and not keep_unmatched:
+        # Only error on non-journal unmatched if we don't have account verification
+        # (journals with account verification are handled above)
+        if journaled_unmatched or (journal_unmatched and not account_numbers):
+            error_msg = f"{total_unmatched} unmatched transfer(s) found "
+            error_msg += "(use --keep-unmatched-transfers to keep them):\n"
+
+            if journaled_unmatched:
+                error_msg += "  Journaled Shares:\n"
+                for idx in sorted(journaled_unmatched):
+                    row = journaled_rows[idx]
+                    error_msg += f"    {row[date_idx]}, {row[symbol_idx]}, qty {row[quantity_idx]}\n"
+
+            if journal_unmatched and not account_numbers:
+                error_msg += "  Journal transfers:\n"
+                for idx in sorted(journal_unmatched):
+                    row = journal_rows[idx]
+                    error_msg += f"    {row[date_idx]}, {row[description_idx]}, amt {row[amount_idx]}\n"
+
+            raise ValidationError(error_msg.rstrip())
+
+    if verbose and total_unmatched > 0:
+        unmatched_count = total_unmatched
+        # If we have account numbers, only count non-account-related journals as "kept"
+        if account_numbers and journal_unmatched:
+            non_account_journals = 0
+            for idx in journal_unmatched:
+                row = journal_rows[idx]
+                desc = row[description_idx]
+                acct = extract_journal_account(desc)
+                if not acct or acct not in account_numbers:
+                    non_account_journals += 1
+            unmatched_count = len(journaled_unmatched) + non_account_journals
+
+        if unmatched_count > 0:
+            print(f"  Keeping {unmatched_count} unmatched transfer(s) not involving merge accounts")
+
+    # Build result: other rows + unmatched transfers (if keeping)
     result = other_rows
 
-    if keep_unmatched and unmatched_indices:
-        for idx in sorted(unmatched_indices):
-            result.append(journaled_rows[idx])
+    if keep_unmatched:
+        if journaled_unmatched:
+            for idx in sorted(journaled_unmatched):
+                result.append(journaled_rows[idx])
+        if journal_unmatched:
+            for idx in sorted(journal_unmatched):
+                result.append(journal_rows[idx])
 
-    pairs_matched = len(matched_indices) // 2
-    total_removed = len(matched_indices)
+    # Print summary
+    total_found = len(journaled_rows) + len(journal_rows)
+    total_pairs = journaled_pairs_matched + journal_pairs_matched
+    total_removed = len(journaled_matched_indices) + len(journal_matched_indices)
 
-    print(f"Journaled Shares: {len(journaled_rows)} found, {pairs_matched} pair(s) matched, {total_removed} removed")
+    if journaled_rows:
+        print(f"Journaled Shares: {len(journaled_rows)} found, {journaled_pairs_matched} pair(s) matched, {len(journaled_matched_indices)} removed")
+    if journal_rows:
+        print(f"Journal transfers: {len(journal_rows)} found, {journal_pairs_matched} pair(s) matched, {len(journal_matched_indices)} removed")
 
     return result
 
@@ -557,12 +779,39 @@ def main() -> int:
     if duplicates_removed > 0:
         print(f"Removed: {duplicates_removed:,} duplicate(s)")
 
+    # Extract account numbers from filenames for journal transfer verification
+    account_numbers = set()
+    missing_account_info = []
+
+    for filepath in input_files:
+        filename = filepath.name
+        acct_num = extract_account_number(filename)
+        if acct_num:
+            account_numbers.add(acct_num)
+        else:
+            missing_account_info.append(filename)
+
+    # Only use account verification if we could extract account numbers from ALL files
+    if missing_account_info:
+        if verbose:
+            print(f"⚠ Warning: Could not extract account numbers from {len(missing_account_info)} file(s):")
+            for fname in missing_account_info:
+                print(f"    {fname}")
+            print("  Skipping account verification for journal transfers")
+            print()
+        account_numbers = None  # Disable account verification
+    else:
+        if verbose:
+            print(f"Detected account numbers: {sorted(account_numbers)}")
+            print()
+
     # Step 4.5: Filter Journaled Shares
     try:
         all_rows = filter_journaled_shares(
             all_rows,
             reference_headers,
             args.keep_unmatched_transfers,
+            account_numbers,
             verbose
         )
     except ValidationError as e:

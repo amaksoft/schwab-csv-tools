@@ -6,6 +6,7 @@ Utilities for processing Charles Schwab CSV export files.
 
 This package provides command-line tools to help you manage and process Charles Schwab CSV exports:
 
+- **cgt-calc-wrapper**: One-command workflow that merges, preprocesses, and runs cgt-calc
 - **merge-schwab-csv**: Merge multiple transaction CSV files
 - **merge-schwab-awards**: Merge multiple equity awards CSV files
 - **postprocess-schwab-csv**: Fix missing symbols and rounding errors in transaction files
@@ -27,6 +28,72 @@ pip install -e .
 ```
 
 ## Command-Line Tools
+
+### cgt-calc-wrapper
+
+**The easiest way to get started** - runs the complete workflow in one command.
+
+This wrapper orchestrates all the preprocessing steps and then runs `cgt-calc`:
+1. Merges transaction CSV files
+2. Merges equity awards CSV files
+3. Postprocesses transactions (fixes symbols and rounding errors)
+4. Runs cgt-calc with the processed files
+
+**Requirements:**
+- `capital-gains-calculator` must be installed (`pip install capital-gains-calculator`)
+
+**Usage:**
+
+```bash
+# Basic usage
+cgt-calc-wrapper \
+  --transactions tx1.csv tx2.csv \
+  --awards awards1.csv awards2.csv \
+  --year 2024
+
+# With symbol mapping and PDF report
+cgt-calc-wrapper \
+  --transactions tx1.csv tx2.csv tx3.csv \
+  --awards awards1.csv awards2.csv \
+  --symbol-mapping my_mappings.csv \
+  --year 2024 \
+  --report report_2024.pdf
+
+# Keep intermediate files for inspection
+cgt-calc-wrapper \
+  --transactions tx.csv \
+  --awards awards.csv \
+  --year 2024 \
+  --output-dir ./processed \
+  --keep-intermediates
+
+# Pass additional arguments to cgt-calc
+cgt-calc-wrapper \
+  --transactions tx.csv \
+  --awards awards.csv \
+  --year 2024 \
+  -- --initial-prices initial.csv --verbose
+```
+
+**Options:**
+- `-t, --transactions FILE [FILE ...]`: Transaction CSV files to merge (required)
+- `-a, --awards FILE [FILE ...]`: Equity awards CSV files to merge (required)
+- `-y, --year YEAR`: Tax year to calculate (required)
+- `-m, --symbol-mapping FILE`: CSV file mapping descriptions to symbols (optional)
+- `-o, --output-dir DIR`: Directory for processed files (default: current directory)
+- `-r, --report FILE`: Output PDF report path
+- `--keep-intermediates`: Keep intermediate merged files (default: delete after processing)
+- `-v, --verbose`: Show detailed processing information
+- Additional arguments after `--` are passed directly to cgt-calc
+
+**What it does:**
+1. Creates `merged_transactions.csv` from your transaction files
+2. Creates `merged_awards.csv` from your awards files
+3. Creates `transactions_final.csv` with fixed symbols and rounding errors
+4. Runs cgt-calc with the final files
+5. Cleans up intermediate files (unless `--keep-intermediates` is used)
+
+---
 
 ### merge-schwab-csv
 
@@ -146,9 +213,24 @@ When no mapping is provided, symbols are generated as acronyms from descriptions
 
 Detects and fixes small discrepancies ($0.01-$1.00) in dividend reinvestment transactions where the amount doesn't exactly match quantity × price.
 
-## Workflow Example
+## Workflow Examples
 
-A typical workflow for processing Schwab exports:
+### Quick Start (Recommended)
+
+Use the wrapper to run everything in one command:
+
+```bash
+cgt-calc-wrapper \
+  --transactions account1_2023.csv account1_2024.csv account2_2023.csv account2_2024.csv \
+  --awards awards_2023.csv awards_2024.csv \
+  --symbol-mapping my_mappings.csv \
+  --year 2024 \
+  --report tax_report_2024.pdf
+```
+
+### Manual Step-by-Step
+
+For more control over the process, run each step individually:
 
 ```bash
 # 1. Merge all transaction files
@@ -169,11 +251,12 @@ postprocess-schwab-csv all_transactions.csv \
   --fix-rounding \
   -o transactions_final.csv
 
-# 4. Use with cgt-calc (if installed)
+# 4. Run cgt-calc
 cgt-calc \
   --schwab transactions_final.csv \
   --schwab-awards all_awards.csv \
-  --year 2024
+  --year 2024 \
+  --report tax_report_2024.pdf
 ```
 
 ## Development

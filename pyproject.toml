@@ -34,6 +34,7 @@ dependencies = []
 merge-schwab-csv = "schwab_csv_tools.merge_transactions:main"
 merge-schwab-awards = "schwab_csv_tools.merge_awards:main"
 postprocess-schwab-csv = "schwab_csv_tools.postprocess:main"
+cgt-calc-wrapper = "schwab_csv_tools.cgt_wrapper:main"
 
 [tool.ruff]
 target-version = "py312"
