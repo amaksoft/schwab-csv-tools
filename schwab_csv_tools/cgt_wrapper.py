@@ -148,7 +148,7 @@ Example usage:
     --symbol-mapping mappings.csv \\
     --output-dir ./processed \\
     --year 2024 \\
-    --report output.pdf
+    --pdf output.pdf
 
   # Pass additional cgt-calc arguments
   cgt-calc-wrapper \\
@@ -209,10 +209,10 @@ Example usage:
         help="Tax year to calculate (required for cgt-calc)",
     )
     parser.add_argument(
-        "--report",
-        "-r",
+        "--pdf",
+        "-p",
         metavar="FILE",
-        help="Output PDF report path (passed to cgt-calc)",
+        help="Output PDF report path (passed to cgt-calc as --output)",
     )
 
     # Verbosity
@@ -298,8 +298,8 @@ Example usage:
             str(args.year),
         ]
 
-        if args.report:
-            cgt_calc_cmd.extend(["--report", args.report])
+        if args.pdf:
+            cgt_calc_cmd.extend(["--output", args.pdf])
 
         # Add any additional arguments (after --)
         if args.cgt_calc_args and args.cgt_calc_args[0] == "--":

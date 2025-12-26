@@ -57,7 +57,7 @@ cgt-calc-wrapper \
   --awards awards1.csv awards2.csv \
   --symbol-mapping my_mappings.csv \
   --year 2024 \
-  --report report_2024.pdf
+  --pdf report_2024.pdf
 
 # Keep intermediate files for inspection
 cgt-calc-wrapper \
@@ -81,7 +81,7 @@ cgt-calc-wrapper \
 - `-y, --year YEAR`: Tax year to calculate (required)
 - `-m, --symbol-mapping FILE`: CSV file mapping descriptions to symbols (optional)
 - `-o, --output-dir DIR`: Directory for processed files (default: current directory)
-- `-r, --report FILE`: Output PDF report path
+- `-p, --pdf FILE`: Output PDF report path
 - `--keep-intermediates`: Keep intermediate merged files (default: delete after processing)
 - `-v, --verbose`: Show detailed processing information
 - Additional arguments after `--` are passed directly to cgt-calc
@@ -225,7 +225,7 @@ cgt-calc-wrapper \
   --awards awards_2023.csv awards_2024.csv \
   --symbol-mapping my_mappings.csv \
   --year 2024 \
-  --report tax_report_2024.pdf
+  --pdf tax_report_2024.pdf
 ```
 
 ### Manual Step-by-Step
@@ -256,7 +256,7 @@ cgt-calc \
   --schwab transactions_final.csv \
   --schwab-awards all_awards.csv \
   --year 2024 \
-  --report tax_report_2024.pdf
+  --output tax_report_2024.pdf
 ```
 
 ## Development
