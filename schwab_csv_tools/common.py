@@ -43,6 +43,7 @@ SECURITY_ACTIONS: Final[set[str]] = {
     "Stock Plan Activity",
     "Reinvest Shares",
     "Qual Div Reinvest",
+    "Cash Dividend",
     "Cancel Buy",
     "Journal",  # May involve security transfers
 }
