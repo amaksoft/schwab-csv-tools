@@ -94,9 +94,9 @@ def find_cgt_calc() -> Path | None:
 def run_command(cmd: list[str], description: str) -> None:
     """Run a command and handle errors.
 
-    Checks both exit code and output for error indicators.
-    Output is streamed in real-time. Interactive prompts will fail
-    immediately since stdin is set to DEVNULL.
+    Checks both exit code and stderr for error indicators.
+    Stdout is streamed in real-time, stderr is captured for error detection.
+    Interactive prompts will fail immediately since stdin is set to DEVNULL.
     """
     print(f"\n{'=' * 70}")
     print(f"{description}")
@@ -107,12 +107,26 @@ def run_command(cmd: list[str], description: str) -> None:
         cmd,
         check=False,
         stdin=subprocess.DEVNULL,  # Fail immediately on interactive prompts
+        stderr=subprocess.PIPE,  # Capture stderr for error detection
         text=True
     )
+
+    # Check stderr for critical errors (cgt-calc returns 0 even on errors)
+    has_critical_error = False
+    if result.stderr:
+        # Print stderr to user
+        print(result.stderr, end='', file=sys.stderr)
+        # Check for error indicators
+        has_critical_error = (
+            'CRITICAL:' in result.stderr or 'Traceback' in result.stderr
+        )
 
     if result.returncode != 0:
         print(f"\n❌ Error: {description} failed with exit code {result.returncode}")
         sys.exit(result.returncode)
+    elif has_critical_error:
+        print(f"\n❌ Error: {description} failed (critical error detected)")
+        sys.exit(1)
 
     print(f"\n✅ {description} completed successfully")
 
