@@ -299,7 +299,7 @@ class TestDateSorting:
     """Test date sorting functionality."""
 
     def test_sort_by_date(self):
-        """Test transactions are sorted by date (oldest first)."""
+        """Test transactions are sorted by date (newest first, like Schwab)."""
         from schwab_csv_tools.merge_transactions import sort_by_date
 
         headers = [
@@ -315,10 +315,52 @@ class TestDateSorting:
 
         sorted_rows = sort_by_date(rows, headers, verbose=False)
 
-        # Should be sorted: 01/15, 02/10, 03/20
-        assert sorted_rows[0][0] == "01/15/2024"
+        # Should be sorted: 03/20, 02/10, 01/15
+        assert sorted_rows[0][0] == "03/20/2024"
         assert sorted_rows[1][0] == "02/10/2024"
-        assert sorted_rows[2][0] == "03/20/2024"
+        assert sorted_rows[2][0] == "01/15/2024"
+
+    def test_sort_is_stable_within_a_date(self):
+        """Same-day rows keep their original relative order."""
+        from schwab_csv_tools.merge_transactions import sort_by_date
+
+        headers = [
+            "Date", "Action", "Symbol", "Description",
+            "Price", "Quantity", "Fees & Comm", "Amount"
+        ]
+
+        rows = [
+            ("02/10/2024", "Cash Merger", "AAA", "A CORP", "", "", "", "$100.00"),
+            ("02/10/2024", "Cash Merger Adj", "AAA", "A CORP", "", "-10", "", ""),
+            ("01/15/2024", "Buy", "AAPL", "APPLE INC", "$150.00", "10", "$1.00", "-$1,501.00"),
+        ]
+
+        sorted_rows = sort_by_date(rows, headers, verbose=False)
+
+        assert [row[1] for row in sorted_rows] == ["Cash Merger", "Cash Merger Adj", "Buy"]
+
+    def test_invalid_dates_sort_to_end(self):
+        """Rows with unparseable dates stay at the end of the output."""
+        from schwab_csv_tools.merge_transactions import sort_by_date
+
+        headers = [
+            "Date", "Action", "Symbol", "Description",
+            "Price", "Quantity", "Fees & Comm", "Amount"
+        ]
+
+        rows = [
+            ("not a date", "Buy", "AAPL", "APPLE INC", "$150.00", "10", "$1.00", "-$1,501.00"),
+            ("01/15/2024", "Buy", "AAPL", "APPLE INC", "$150.00", "10", "$1.00", "-$1,501.00"),
+            ("03/20/2024", "Sell", "AAPL", "APPLE INC", "$155.00", "5", "$1.00", "$774.00"),
+        ]
+
+        sorted_rows = sort_by_date(rows, headers, verbose=False)
+
+        assert [row[0] for row in sorted_rows] == [
+            "03/20/2024",
+            "01/15/2024",
+            "not a date",
+        ]
 
 
 class TestAccountNumberExtraction:
@@ -380,3 +422,52 @@ class TestDateRange:
 
         assert earliest == "N/A"
         assert latest == "N/A"
+
+
+class TestOrderingNormalization:
+    """Test that an oldest-first archive still merges into native order."""
+
+    HEADERS = [
+        "Date", "Action", "Symbol", "Description",
+        "Price", "Quantity", "Fees & Comm", "Amount"
+    ]
+
+    def _row(self, date, action):
+        return (date, action, "FOO", "FOO CORP", "$1.00", "1", "", "$1.00")
+
+    def test_oldest_first_archive_restores_native_order(self):
+        """Days flip to newest-first while same-day order is left alone.
+
+        An archive written by an earlier version of this tool has its days
+        ascending, but each day's rows are still in the newest-first order
+        Schwab exported them in, because that version sorted stably too.
+        Re-sorting the days is therefore all that is needed - reversing the
+        whole file would also invert each day and break cgt-calc's pairing.
+        """
+        from schwab_csv_tools.merge_transactions import sort_by_date
+
+        rows = [
+            self._row("01/15/2024", "Buy"),
+            self._row("02/10/2024", "Cash Merger"),
+            self._row("02/10/2024", "Cash Merger Adj"),
+        ]
+
+        result = sort_by_date(rows, self.HEADERS, verbose=False)
+
+        assert [(row[0], row[1]) for row in result] == [
+            ("02/10/2024", "Cash Merger"),
+            ("02/10/2024", "Cash Merger Adj"),
+            ("01/15/2024", "Buy"),
+        ]
+
+    def test_native_export_order_is_preserved(self):
+        """A newest-first Schwab export passes through unchanged."""
+        from schwab_csv_tools.merge_transactions import sort_by_date
+
+        rows = [
+            self._row("02/10/2024", "Cash Merger"),
+            self._row("02/10/2024", "Cash Merger Adj"),
+            self._row("01/15/2024", "Buy"),
+        ]
+
+        assert sort_by_date(rows, self.HEADERS, verbose=False) == rows

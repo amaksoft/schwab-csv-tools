@@ -189,7 +189,21 @@ def sort_by_date(
     headers: list[str],
     verbose: bool = False
 ) -> list[tuple[str, ...]]:
-    """Sort rows by date (oldest first).
+    """Sort rows by date, newest first (native Schwab export order).
+
+    Schwab exports transactions newest-first, and cgt-calc's Schwab parser
+    relies on that: it matches paired rows (Cancel Buy/Buy, Cash Merger/Adj,
+    Full Redemption/Adj) assuming a newest-first list and then reverses the
+    whole list to get chronological order. Emitting oldest-first here would
+    both break the pair matching and reverse the relative order of same-day
+    transactions in cgt-calc's final chronological list.
+
+    The sort is stable, so within one date the original row order of the input
+    files is preserved. That is what makes an oldest-first archive from an
+    earlier run of this tool safe to feed back in: such a file has its days
+    ascending but each day's rows still in Schwab's order, so re-sorting the
+    days descending restores the native layout without touching same-day
+    ordering. Rows with unparseable dates are kept at the end.
 
     Args:
         rows: List of row tuples
@@ -197,21 +211,22 @@ def sort_by_date(
         verbose: Print warnings for invalid dates
 
     Returns:
-        Sorted list
+        Sorted list (newest first)
     """
     date_index = headers.index("Date")
 
-    def get_sort_key(row: tuple[str, ...]) -> tuple[datetime.date, int]:
-        """Get sort key for row (date, original_position).
+    def get_sort_key(row: tuple[str, ...]) -> tuple[int, int]:
+        """Get sort key for row.
 
-        Rows with invalid dates sort to end.
+        Returns (0, -ordinal) for valid dates so that ascending sort yields
+        newest-first, and (1, 0) for invalid dates so they sort to the end.
         """
         date = parse_date(row[date_index])
         if date is None:
             if verbose:
                 print(f"  ⚠ Warning: Invalid date '{row[date_index]}', sorting to end")
-            return (datetime.date.max, 0)
-        return (date, 0)
+            return (1, 0)
+        return (0, -date.toordinal())
 
     return sorted(rows, key=get_sort_key)
 
@@ -277,31 +292,39 @@ def get_date_range(rows: list[tuple[str, ...]], headers: list[str]) -> tuple[str
 def _separate_by_action(
     rows: list[tuple[str, ...]],
     headers: list[str]
-) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]], list[tuple[str, ...]]]:
-    """Separate rows by action type.
+) -> tuple[
+    list[tuple[str, ...]],
+    list[tuple[str, ...]],
+    list[int],
+    list[int],
+]:
+    """Separate transfer rows by action type.
 
     Args:
         rows: All transaction rows
         headers: Column headers
 
     Returns:
-        Tuple of (journaled_rows, journal_rows, other_rows)
+        Tuple of (journaled_rows, journal_rows, journaled_positions,
+        journal_positions), where the position lists hold the index each
+        transfer row had in ``rows`` so the original order can be restored.
     """
     action_idx = headers.index("Action")
 
     journaled_rows = []
     journal_rows = []
-    other_rows = []
+    journaled_positions = []
+    journal_positions = []
 
-    for row in rows:
+    for position, row in enumerate(rows):
         if row[action_idx] == "Journaled Shares":
             journaled_rows.append(row)
+            journaled_positions.append(position)
         elif row[action_idx] == "Journal":
             journal_rows.append(row)
-        else:
-            other_rows.append(row)
+            journal_positions.append(position)
 
-    return journaled_rows, journal_rows, other_rows
+    return journaled_rows, journal_rows, journaled_positions, journal_positions
 
 
 def _match_journaled_shares(
@@ -595,40 +618,48 @@ def _validate_unmatched_transfers(
 
 
 def _combine_results(
-    other_rows: list[tuple[str, ...]],
-    journaled_rows: list[tuple[str, ...]],
+    rows: list[tuple[str, ...]],
+    journaled_positions: list[int],
     journaled_matched: set[int],
-    journal_rows: list[tuple[str, ...]],
+    journal_positions: list[int],
     journal_matched: set[int],
     keep_unmatched: bool
 ) -> list[tuple[str, ...]]:
-    """Combine other rows with unmatched transfers.
+    """Drop matched transfer pairs from the original row list.
+
+    The original row order is preserved: rows are filtered in place rather
+    than regrouped, so same-day ordering from the source exports survives.
 
     Args:
-        other_rows: Non-transfer rows
-        journaled_rows: Journaled Shares rows
+        rows: All transaction rows, in original order
+        journaled_positions: Position in ``rows`` of each Journaled Shares row
         journaled_matched: Matched Journaled Shares indices
-        journal_rows: Journal rows
+        journal_positions: Position in ``rows`` of each Journal row
         journal_matched: Matched Journal indices
         keep_unmatched: Whether to keep unmatched transfers
 
     Returns:
-        Combined result rows
+        Filtered result rows, in original order
     """
-    result = list(other_rows)  # Start with non-transfer rows
+    positions_to_drop = {journaled_positions[idx] for idx in journaled_matched}
+    positions_to_drop |= {journal_positions[idx] for idx in journal_matched}
 
-    if keep_unmatched:
-        # Add unmatched journaled shares
-        journaled_unmatched = set(range(len(journaled_rows))) - journaled_matched
-        for idx in sorted(journaled_unmatched):
-            result.append(journaled_rows[idx])
+    if not keep_unmatched:
+        # Unmatched transfers that reached this point are not an error (they
+        # were validated above), but they don't belong in a merged single
+        # account view either.
+        positions_to_drop |= {
+            position
+            for idx, position in enumerate(journaled_positions)
+            if idx not in journaled_matched
+        }
+        positions_to_drop |= {
+            position
+            for idx, position in enumerate(journal_positions)
+            if idx not in journal_matched
+        }
 
-        # Add unmatched journal transfers
-        journal_unmatched = set(range(len(journal_rows))) - journal_matched
-        for idx in sorted(journal_unmatched):
-            result.append(journal_rows[idx])
-
-    return result
+    return [row for position, row in enumerate(rows) if position not in positions_to_drop]
 
 
 def _print_transfer_summary(
@@ -733,7 +764,12 @@ def filter_journaled_shares(
         ValidationError: If unmatched journaled shares found and keep_unmatched=False
     """
     # Step 1: Separate rows by action type
-    journaled_rows, journal_rows, other_rows = _separate_by_action(rows, headers)
+    (
+        journaled_rows,
+        journal_rows,
+        journaled_positions,
+        journal_positions,
+    ) = _separate_by_action(rows, headers)
 
     # Early exit if no transfers to process
     if not journaled_rows and not journal_rows:
@@ -760,10 +796,10 @@ def filter_journaled_shares(
 
     # Step 5: Combine results
     result = _combine_results(
-        other_rows,
-        journaled_rows,
+        rows,
+        journaled_positions,
         journaled_matched,
-        journal_rows,
+        journal_positions,
         journal_matched,
         keep_unmatched,
     )
@@ -930,18 +966,30 @@ def main() -> int:
         else:
             missing_account_info.append(filename)
 
-    # Only use account verification if we could extract account numbers from ALL files
-    if missing_account_info:
-        if verbose:
-            print(f"⚠ Warning: Could not extract account numbers from {len(missing_account_info)} file(s):")
-            for fname in missing_account_info:
-                print(f"    {fname}")
-            print("  Skipping account verification for journal transfers")
-            print()
+    # Verification needs at least one account number, not one from every file.
+    # Archives written by this tool are named for the year rather than the
+    # account, and they hold rows for the same accounts as the fresh exports
+    # alongside them, so they contribute nothing to the set and must not switch
+    # the check off for the whole merge.
+    if not account_numbers:
+        print(
+            f"⚠ Warning: no account numbers in any of the {len(input_files)} "
+            "filename(s), so journal transfers cannot be verified against the "
+            "accounts being merged"
+        )
+        for fname in missing_account_info:
+            print(f"    {fname}")
+        print()
         account_numbers = None  # type: ignore[assignment]  # Disable account verification
     else:
         if verbose:
             print(f"Detected account numbers: {sorted(account_numbers)}")
+            if missing_account_info:
+                print(
+                    "  (no account number in the filename of "
+                    f"{len(missing_account_info)} file(s), which is expected "
+                    "for archives)"
+                )
             print()
 
     # Step 4.5: Filter Journaled Shares
