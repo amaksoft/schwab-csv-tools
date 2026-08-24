@@ -91,6 +91,71 @@ def find_cgt_calc() -> Path | None:
     return _find_executable_in_env("cgt-calc")
 
 
+TRANSACTIONS_ARCHIVE_GLOB = "transactions_archive_*.csv"
+AWARDS_ARCHIVE_GLOB = "awards_archive_*.csv"
+
+
+def collect_archive_inputs(directories: list[str]) -> tuple[list[str], list[str]]:
+    """Find archived transaction and awards files in the given directories.
+
+    Args:
+        directories: Directories holding archives written by earlier runs
+
+    Returns:
+        Tuple of (transaction files, awards files), each sorted
+
+    Raises:
+        SystemExit: If a directory does not exist or holds no archive files
+    """
+    transactions: list[str] = []
+    awards: list[str] = []
+
+    for directory in directories:
+        path = Path(directory)
+        if not path.is_dir():
+            print(f"\n❌ Error: --archive-in directory not found: {path}")
+            sys.exit(1)
+
+        found_transactions = sorted(path.glob(TRANSACTIONS_ARCHIVE_GLOB))
+        found_awards = sorted(path.glob(AWARDS_ARCHIVE_GLOB))
+        if not found_transactions and not found_awards:
+            print(
+                f"\n❌ Error: no archive files in {path}. Expected files named "
+                f"{TRANSACTIONS_ARCHIVE_GLOB} or {AWARDS_ARCHIVE_GLOB}."
+            )
+            sys.exit(1)
+
+        transactions += [str(p) for p in found_transactions]
+        awards += [str(p) for p in found_awards]
+
+    return transactions, awards
+
+
+def check_archive_dirs_are_separate(archive_in: list[str], archive_out: str) -> None:
+    """Refuse to write an archive into a directory being read as input.
+
+    Reading and writing the same archive is what made earlier versions of this
+    tool able to damage history: a run with a missing input could overwrite a
+    complete archive with a shorter one. Keeping the two directories disjoint
+    makes last year's archive immutable by construction.
+
+    Raises:
+        SystemExit: If the output directory is also an input directory
+    """
+    out = Path(archive_out).resolve()
+    for directory in archive_in:
+        if Path(directory).resolve() == out:
+            print(
+                f"\n❌ Error: --archive-out {archive_out} is also an --archive-in "
+                "directory."
+            )
+            print(
+                "   Archives are read-only inputs. Write this year's archive to a "
+                "new directory, and pass it as --archive-in next year."
+            )
+            sys.exit(1)
+
+
 def run_command(cmd: list[str], description: str) -> None:
     """Run a command and handle errors.
 
@@ -212,11 +277,41 @@ Example usage:
         help="CSV file mapping descriptions to symbols (optional)",
     )
     parser.add_argument(
+        "--remap-symbols",
+        action="store_true",
+        help=(
+            "also rewrite symbols that disagree with --symbol-mapping "
+            "(e.g. a CUSIP used instead of the ticker)"
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         "-o",
         metavar="DIR",
         default=".",
         help="Directory for intermediate processed files (default: current directory)",
+    )
+    parser.add_argument(
+        "--archive-in",
+        nargs="+",
+        metavar="DIR",
+        help=(
+            "directories holding archives written by earlier runs. Their "
+            "transaction and awards files are added to the merge, carrying "
+            "history that has aged out of Schwab's four-year export window. "
+            "Read-only: nothing in these directories is ever written to"
+        ),
+    )
+    parser.add_argument(
+        "--archive-out",
+        metavar="DIR",
+        help=(
+            "directory to write this year's archive to, for use as --archive-in "
+            "next year. Must not be an --archive-in directory. The archive holds "
+            "the merged rows before symbol and rounding fixes, so that it still "
+            "deduplicates against future Schwab exports; matched inter-account "
+            "transfers are already filtered out of it"
+        ),
     )
     parser.add_argument(
         "--keep-intermediates",
@@ -266,6 +361,25 @@ Example usage:
         print("Please install: pip install capital-gains-calculator")
         sys.exit(1)
 
+    # Resolve archive inputs before anything is written. Archives are strictly
+    # read-only here; this year's goes to a separate --archive-out directory.
+    transaction_files = list(args.transactions)
+    awards_files = list(args.awards)
+    if args.archive_in:
+        if args.archive_out:
+            check_archive_dirs_are_separate(args.archive_in, args.archive_out)
+        archived_transactions, archived_awards = collect_archive_inputs(
+            args.archive_in
+        )
+        # Appended after the fresh exports so that, where both hold a row, the
+        # export's copy is the one kept and sets the same-day ordering.
+        transaction_files += archived_transactions
+        awards_files += archived_awards
+        print(
+            f"Using {len(archived_transactions)} archived transaction file(s) and "
+            f"{len(archived_awards)} archived awards file(s)"
+        )
+
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -298,7 +412,7 @@ Example usage:
             find_script_in_same_env("merge-schwab-csv"),
             "-o",
             str(transactions_raw_merged),
-            *args.transactions,
+            *transaction_files,
         ]
         if args.verbose:
             merge_tx_cmd.append("-v")
@@ -312,7 +426,7 @@ Example usage:
             find_script_in_same_env("merge-schwab-awards"),
             "-o",
             str(awards_merged),
-            *args.awards,
+            *awards_files,
         ]
         if args.verbose:
             merge_awards_cmd.append("-v")
@@ -321,6 +435,24 @@ Example usage:
             f"Step {step_num}/{total_steps}: Merging equity awards files",
         )
         step_num += 1
+
+        # Archive as soon as the merges are done. cgt-calc failing is a routine
+        # outcome, and the archive is the one output that must survive it: it
+        # holds history that Schwab will no longer export.
+        if args.archive_out:
+            archive_dir = Path(args.archive_out)
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            transactions_archive = archive_dir / f"transactions_archive_{args.year}.csv"
+            awards_archive = archive_dir / f"awards_archive_{args.year}.csv"
+            shutil.copyfile(transactions_raw_merged, transactions_archive)
+            shutil.copyfile(awards_merged, awards_archive)
+            print("\n📦 Archived merged history for future runs:")
+            print(f"   {transactions_archive}")
+            print(f"   {awards_archive}")
+            print(
+                f"   Pass --archive-in {archive_dir} to next year's run so history "
+                "older than Schwab's four-year export window is not lost."
+            )
 
         # Step 3 (optional): Merge initial prices files
         if args.initial_prices:
@@ -360,6 +492,8 @@ Example usage:
         ]
         if args.symbol_mapping:
             postprocess_cmd.extend(["-m", args.symbol_mapping])
+            if args.remap_symbols:
+                postprocess_cmd.append("--remap-symbols")
         if args.verbose:
             postprocess_cmd.append("-v")
         run_command(

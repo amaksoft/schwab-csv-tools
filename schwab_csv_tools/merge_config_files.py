@@ -5,7 +5,30 @@ from __future__ import annotations
 
 import csv
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TextIO
+
+
+def strip_comments(lines: TextIO) -> Iterator[str]:
+    """Yield CSV lines with '#' comments and blank lines removed.
+
+    Config files like these are kept by hand or generated with a provenance
+    banner, for example "# Last updated: 2025-12-27, Years: 1998-2025".
+    csv.DictReader has no notion of comments, so it takes that first line as
+    the header row and every column lookup then fails with a KeyError.
+
+    Args:
+        lines: Open text file
+
+    Yields:
+        Lines that are neither blank nor comments
+    """
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#") or not stripped.strip():
+            continue
+        yield line
 
 
 def merge_initial_prices(
@@ -32,7 +55,7 @@ def merge_initial_prices(
             print(f"  Reading {filepath}")
 
         with open(filepath, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
+            reader = csv.DictReader(strip_comments(f))
             for row in reader:
                 date = row["date"]
                 symbol = row["symbol"]
@@ -86,7 +109,7 @@ def merge_spin_offs(
             print(f"  Reading {filepath}")
 
         with open(filepath, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
+            reader = csv.DictReader(strip_comments(f))
             for row in reader:
                 dst = row["dst"]
                 src = row["src"]
