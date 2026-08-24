@@ -94,8 +94,11 @@ cgt-calc-wrapper \
 - `-i, --initial-prices FILE [FILE ...]`: Initial prices CSV files to merge (optional)
 - `-s, --spin-offs FILE [FILE ...]`: Spin-offs CSV files to merge (optional)
 - `-m, --symbol-mapping FILE`: CSV file mapping descriptions to symbols (optional)
+- `--remap-symbols`: Also rewrite symbols that disagree with `--symbol-mapping`
 - `-o, --output-dir DIR`: Directory for processed files (default: current directory)
 - `-p, --pdf FILE`: Output PDF report path
+- `--archive-in DIR [DIR ...]`: Read archives from earlier runs (read-only, see below)
+- `--archive-out DIR`: Write this year's archive to DIR, for use as next year's `--archive-in`
 - `--keep-intermediates`: Keep intermediate merged files (default: delete after processing)
 - `-v, --verbose`: Show detailed processing information
 - Additional arguments after `--` are passed directly to cgt-calc
@@ -109,15 +112,83 @@ cgt-calc-wrapper \
 
 ---
 
+### Keeping history beyond Schwab's four-year limit
+
+Schwab only exports the last four years of transactions. UK capital gains needs
+the **whole** history, because the section 104 pool cost of anything you still
+hold depends on when you first acquired it. Once a purchase or a vest scrolls
+out of the export window, that cost basis is gone unless you kept it.
+
+Archives are strictly one-way: a run **reads** `--archive-in` and **writes**
+`--archive-out`, and the two may never be the same directory. Keep one
+directory per tax year:
+
+```bash
+cgt-calc-wrapper \
+  --transactions account1.csv account2.csv \
+  --awards awards.csv \
+  --year 2025 \
+  --archive-in archive/2024 \
+  --archive-out archive/2025 \
+  --pdf tax_report_2025.pdf
+```
+
+Next year you pass `--archive-in archive/2025` and write `archive/2026`. The
+archived files are added to the merge automatically, so there is nothing to
+remember to include in `--transactions`, and deduplication means the archive
+only ever contributes rows the new exports no longer reach.
+
+**Why one-way.** Last year's archive is the only surviving copy of history that
+Schwab will not export again. If a run could write to the directory it read
+from, then a mistake in this year's inputs — one account's CSV missing, say —
+would overwrite a complete archive with a shorter one and destroy that history
+for good. Because the directories are disjoint, the worst a bad run can do is
+produce a bad *new* archive, which you simply delete and re-run. The wrapper
+refuses outright if `--archive-out` names an `--archive-in` directory.
+
+To start from scratch, create the first `--archive-in` directory by hand with
+whatever older history you have, named `transactions_archive_<year>.csv` and
+`awards_archive_<year>.csv`.
+
+**Archive the merge, not the postprocessed file.** `--archive-out` deliberately
+writes the merged transactions from *before* postprocessing. The postprocessed
+file has synthetic symbols substituted for blank ones (`SI00`, `WFD`, and so on,
+which are position-dependent and not stable between runs) and rounding-corrected
+amounts. Those rows no longer match the corresponding rows in a future Schwab
+export byte for byte, so deduplication misses them and the overlapping history
+gets counted twice.
+
+Note the archive is the output of `merge-schwab-csv`, so matched
+`Journaled Shares` and `Journal` pairs have already been removed from it. That
+is what makes it a single-account view, but it also means a transfer whose
+other leg only appears in a *later* export can never be paired up once the
+first leg has aged out of Schwab's window. Keep the original broker exports as
+well if that matters to you.
+
+Archives written by older versions of this tool, which emitted oldest-first,
+merge correctly too. Those files have their days ascending but each day's rows
+still in Schwab's order, and the sort is stable, so re-sorting the days
+restores the native layout.
+
+---
+
 ### merge-schwab-csv
 
 Merge multiple Schwab transaction CSV files into a single file.
 
 **Features:**
 - Deduplicates transactions (by date, symbol, action, quantity, price)
-- Sorts by date (oldest first)
+- Sorts by date, **newest first**, matching Schwab's own export order
 - Validates CSV format
 - Handles both 8-column and 9-column Schwab formats
+
+**Why newest-first matters:** `cgt-calc`'s Schwab parser assumes a newest-first
+list. It matches paired rows (Cancel Buy/Buy, Cash Merger/Adj, Full
+Redemption/Adj, Reverse Split) in that orientation and then reverses the whole
+list to get chronological order. Emitting oldest-first would both break that
+pair matching and invert the order of same-day transactions in the final
+calculation. The sort is stable, so within one date each input file's original
+row order is preserved.
 
 **Usage:**
 
@@ -174,6 +245,7 @@ Merge multiple initial_prices.csv files for use with cgt-calc.
 **Features:**
 - Deduplicates by (date, symbol) - keeps last occurrence
 - Sorts output by date and symbol
+- Skips `#` comment lines and blank lines
 - Compatible with cgt-calc's `--initial-prices-file` option
 
 **Usage:**
@@ -206,6 +278,8 @@ Merge multiple spin_offs.csv files for use with cgt-calc.
 **Features:**
 - Deduplicates by destination ticker - keeps last occurrence
 - Sorts output by destination ticker
+- Skips `#` comment lines and blank lines, so a file carrying a provenance
+  banner such as `# Last updated: 2025-12-27` still parses
 - Compatible with cgt-calc's `--spin-offs-file` option
 
 **Usage:**
@@ -236,6 +310,7 @@ Fix common issues in Schwab transaction CSV files.
 
 **Features:**
 - **Symbol fixing**: Add missing symbols using mapping file or generate synthetic symbols
+- **Symbol remapping**: Rewrite symbols that are present but wrong (`--remap-symbols`)
 - **Rounding error fix**: Detect and fix small discrepancies in dividend reinvestment amounts
 - Transparent change logging
 
@@ -264,6 +339,25 @@ postprocess-schwab-csv transactions.csv -m mappings.csv --fix-rounding
 - `-v, --verbose`: Show detailed processing information
 - `--write-log`: Write change log to `INPUT_symbol_changes.log`
 - `--fix-rounding`: Fix small rounding errors in dividend reinvestment amounts
+- `--tax-year YEAR`: Drop transactions after April 5, YEAR+1
+- `--remap-symbols`: Also rewrite symbols that are present but disagree with the mapping file
+
+**Symbol Remapping:**
+
+By default only *missing* symbols are filled in. With `--remap-symbols`, a row
+whose description appears in the mapping file is rewritten to the mapped symbol
+even if it already has one. This is for the case where Schwab books the same
+security under two different identifiers, which would otherwise split one
+holding into two unrelated pools. For example, an ADR trading with due bills
+around a corporate action:
+
+```csv
+Description,Symbol
+UNILEVER PLC FTRADES WITH DUE BILLS,UL
+```
+
+Rows carrying the CUSIP `904767704` under that description are moved to `UL`,
+joining the rest of the position.
 
 **Symbol Mapping File Format:**
 
