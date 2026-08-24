@@ -46,6 +46,12 @@ SECURITY_ACTIONS: Final[set[str]] = {
     "Cash Dividend",
     "Cancel Buy",
     "Journal",  # May involve security transfers
+    # cgt-calc resolves these through get_symbol_or_fail, so a blank symbol
+    # aborts the run. Cash In Lieu in particular used to be booked as a plain
+    # cash transfer and needed no symbol at all.
+    "Cash In Lieu",
+    "Reverse Split",
+    "Reinvestment Adj",
 }
 
 # Rounding error thresholds
@@ -216,7 +222,19 @@ def parse_schwab_date(date_str: str) -> datetime | None:
 
     Handles:
     - Standard format: "MM/DD/YYYY"
-    - "as of" format: "06/02/2025 as of 05/30/2025" → uses 05/30/2025
+    - "as of" format: "06/02/2025 as of 05/30/2025" → uses 06/02/2025
+
+    For an "as of" row the leading date is the posting date and the trailing
+    one is when the transaction actually happened. cgt-calc's Schwab parser
+    takes the leading date, so this does too: the tax-year filter has to agree
+    with the tool it feeds, or it would drop rows cgt-calc would have counted.
+
+    Note this means a row posted just after 5 April for a trade just before it
+    is placed in the later tax year. HMRC works from the contract date, so for
+    such a row both tools are consistently a year out. It has not come up in
+    practice - Schwab posts within a day or two, and the dates that straddle
+    the boundary are rare - but changing it means changing cgt-calc's parser
+    too, not just this filter.
 
     Args:
         date_str: Date string from Schwab CSV
@@ -228,7 +246,7 @@ def parse_schwab_date(date_str: str) -> datetime | None:
         >>> parse_schwab_date("05/30/2025")
         datetime(2025, 5, 30, 0, 0)
         >>> parse_schwab_date("06/02/2025 as of 05/30/2025")
-        datetime(2025, 5, 30, 0, 0)
+        datetime(2025, 6, 2, 0, 0)
         >>> parse_schwab_date("")
         None
     """
@@ -238,11 +256,9 @@ def parse_schwab_date(date_str: str) -> datetime | None:
     date_str = date_str.strip()
 
     # Check for "as of" format
-    if " as of " in date_str.lower():
-        # Extract the actual transaction date (after "as of")
-        parts = date_str.lower().split(" as of ")
-        if len(parts) == 2:
-            date_str = parts[1].strip()
+    as_of_index = date_str.lower().find(" as of ")
+    if as_of_index != -1:
+        date_str = date_str[:as_of_index].strip()
 
     try:
         return datetime.strptime(date_str, "%m/%d/%Y")
@@ -389,6 +405,34 @@ def extract_journal_account(desc: str) -> str | None:
 # ============================================================================
 # Symbol Generation
 # ============================================================================
+
+
+def looks_like_ticker(symbol: str) -> bool:
+    """Check whether a symbol looks like a real exchange ticker.
+
+    Real tickers are short and purely alphabetic. Schwab's stand-ins are not:
+    CUSIPs and internal codes mix digits in, and symbols generated from a
+    description are longer acronyms.
+
+    Args:
+        symbol: Symbol from the CSV
+
+    Returns:
+        True if the symbol looks like a genuine ticker
+
+    Examples:
+        >>> looks_like_ticker("UL")
+        True
+        >>> looks_like_ticker("BRK.B")
+        True
+        >>> looks_like_ticker("904767704")
+        False
+        >>> looks_like_ticker("G9T17W137")
+        False
+        >>> looks_like_ticker("IEMWVFUE")
+        False
+    """
+    return bool(re.fullmatch(r"[A-Z]{1,5}(\.[A-Z]{1,2})?", symbol.strip()))
 
 
 def generate_symbol_from_description(description: str) -> str:
