@@ -346,3 +346,253 @@ class TestSymbolFixing:
             input_file.unlink()
             if output_file.exists():
                 output_file.unlink()
+
+
+class TestSchwabDateParsing:
+    """Test the shared Schwab date parser."""
+
+    def test_plain_date(self):
+        """A plain MM/DD/YYYY date is parsed as-is."""
+        from datetime import datetime
+
+        from schwab_csv_tools.common import parse_schwab_date
+
+        assert parse_schwab_date("05/30/2025") == datetime(2025, 5, 30)
+
+    def test_as_of_uses_the_settlement_date(self):
+        """An "as of" row is dated by its leading (settlement) date.
+
+        cgt-calc's Schwab parser uses the leading date, so the tax-year filter
+        has to agree with it or a boundary row lands in the wrong year.
+        """
+        from datetime import datetime
+
+        from schwab_csv_tools.common import parse_schwab_date
+
+        assert parse_schwab_date("06/02/2025 as of 05/30/2025") == datetime(2025, 6, 2)
+
+    def test_unparseable_date(self):
+        """Junk and empty values return None."""
+        from schwab_csv_tools.common import parse_schwab_date
+
+        assert parse_schwab_date("") is None
+        assert parse_schwab_date("not a date") is None
+
+
+class TestSymbolRemapping:
+    """Test rewriting symbols that disagree with the mapping file."""
+
+    HEADERS = [
+        "Date", "Action", "Symbol", "Description",
+        "Price", "Quantity", "Fees & Comm", "Amount",
+    ]
+
+    def _write_input(self, rows):
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, newline=""
+        ) as f:
+            writer = csv.DictWriter(f, fieldnames=self.HEADERS)
+            writer.writeheader()
+            writer.writerows(rows)
+            return Path(f.name)
+
+    def _run(self, rows, remap_symbols):
+        from schwab_csv_tools.postprocess import process_csv
+
+        input_file = self._write_input(rows)
+        output_file = input_file.parent / f"{input_file.stem}_out.csv"
+        try:
+            stats = process_csv(
+                input_file,
+                output_file,
+                mapping={"unilever plc ftrades with due bills": "UL"},
+                verbose=False,
+                write_log=False,
+                fix_rounding=False,
+                remap_symbols=remap_symbols,
+            )
+            with output_file.open() as f:
+                return stats, list(csv.DictReader(f))
+        finally:
+            input_file.unlink()
+            if output_file.exists():
+                output_file.unlink()
+
+    def _row(self, symbol, description):
+        return {
+            "Date": "12/09/2025",
+            "Action": "Reverse Split",
+            "Symbol": symbol,
+            "Description": description,
+            "Price": "",
+            "Quantity": "-185.0291",
+            "Fees & Comm": "",
+            "Amount": "",
+        }
+
+    def test_cusip_symbol_is_rewritten_to_the_ticker(self):
+        """A CUSIP standing in for the ticker is replaced."""
+        stats, rows = self._run(
+            [self._row("904767704", "UNILEVER PLC FTRADES WITH DUE BILLS")],
+            remap_symbols=True,
+        )
+
+        assert stats["remapped"] == 1
+        assert rows[0]["Symbol"] == "UL"
+
+    def test_matching_symbol_is_left_alone(self):
+        """A row already under the mapped ticker is not counted as a change."""
+        stats, rows = self._run(
+            [self._row("UL", "UNILEVER PLC FTRADES WITH DUE BILLS")],
+            remap_symbols=True,
+        )
+
+        assert stats["remapped"] == 0
+        assert rows[0]["Symbol"] == "UL"
+
+    def test_unmapped_description_is_left_alone(self):
+        """Descriptions absent from the mapping file keep their symbol."""
+        stats, rows = self._run(
+            [self._row("912797QL4", "US TREASURY BILL DUE 08/26/25")],
+            remap_symbols=True,
+        )
+
+        assert stats["remapped"] == 0
+        assert rows[0]["Symbol"] == "912797QL4"
+
+    def test_remapping_is_off_by_default(self):
+        """Without the flag an existing symbol is never rewritten."""
+        stats, rows = self._run(
+            [self._row("904767704", "UNILEVER PLC FTRADES WITH DUE BILLS")],
+            remap_symbols=False,
+        )
+
+        assert stats["remapped"] == 0
+        assert rows[0]["Symbol"] == "904767704"
+
+
+class TestTickerRecognition:
+    """Test telling real tickers from Schwab's stand-in codes."""
+
+    def test_real_tickers(self):
+        """Short alphabetic symbols are tickers."""
+        from schwab_csv_tools.common import looks_like_ticker
+
+        for symbol in ["UL", "META", "VNGDF", "F"]:
+            assert looks_like_ticker(symbol), symbol
+
+    def test_codes_are_not_tickers(self):
+        """CUSIPs, internal codes and generated acronyms are not tickers."""
+        from schwab_csv_tools.common import looks_like_ticker
+
+        for symbol in ["904767704", "G9T17W137", "912797QL4", "IEMWVFUE", ""]:
+            assert not looks_like_ticker(symbol), symbol
+
+
+class TestSymbolSplitDetection:
+    """Test detection of one security booked under two symbols."""
+
+    HEADERS = [
+        "Date", "Action", "Symbol", "Description",
+        "Price", "Quantity", "Fees & Comm", "Amount",
+    ]
+
+    def _row(self, symbol, description):
+        return {
+            "Date": "01/15/2025", "Action": "Buy", "Symbol": symbol,
+            "Description": description, "Price": "$1.00", "Quantity": "1",
+            "Fees & Comm": "", "Amount": "-$1.00",
+        }
+
+    def test_finds_description_under_two_symbols(self):
+        """A description appearing under two symbols is reported."""
+        from schwab_csv_tools.postprocess import detect_symbol_splits
+
+        splits = detect_symbol_splits([
+            self._row("UL", "UNILEVER PLC FTRADES WITH DUE BILLS"),
+            self._row("904767704", "UNILEVER PLC FTRADES WITH DUE BILLS"),
+            self._row("MSFT", "MICROSOFT CORP"),
+        ])
+
+        assert splits == {"UNILEVER PLC FTRADES WITH DUE BILLS": {"UL", "904767704"}}
+
+    def test_consistent_symbols_are_not_reported(self):
+        """One symbol per description is fine."""
+        from schwab_csv_tools.postprocess import detect_symbol_splits
+
+        assert detect_symbol_splits([
+            self._row("MSFT", "MICROSOFT CORP"),
+            self._row("MSFT", "MICROSOFT CORP"),
+        ]) == {}
+
+    def test_blank_symbols_are_ignored(self):
+        """Rows still missing a symbol are not counted as a split."""
+        from schwab_csv_tools.postprocess import detect_symbol_splits
+
+        assert detect_symbol_splits([
+            self._row("MSFT", "MICROSOFT CORP"),
+            self._row("", "MICROSOFT CORP"),
+        ]) == {}
+
+    def test_ticker_plus_code_is_suspicious(self):
+        """A ticker alongside a code is the one-security-two-ways signature."""
+        from schwab_csv_tools.postprocess import split_is_suspicious
+
+        assert split_is_suspicious({"UL", "904767704"})
+        assert split_is_suspicious({"VNGDF", "G9T17W137"})
+
+    def test_two_codes_are_not_suspicious(self):
+        """Two CUSIPs sharing a generic description are different securities."""
+        from schwab_csv_tools.postprocess import split_is_suspicious
+
+        assert not split_is_suspicious({"912797QL4", "912797SR9"})
+
+    def test_two_tickers_are_not_suspicious(self):
+        """A ticker rename is handled by cgt-calc, not by remapping."""
+        from schwab_csv_tools.postprocess import split_is_suspicious
+
+        assert not split_is_suspicious({"FB", "META"})
+
+
+class TestGeneratedSymbolCollisions:
+    """Test that a synthetic symbol never lands on a real one."""
+
+    HEADERS = [
+        "Date", "Action", "Symbol", "Description",
+        "Price", "Quantity", "Fees & Comm", "Amount",
+    ]
+
+    def test_generated_symbol_avoids_a_ticker_already_in_the_file(self, tmp_path):
+        """A generated acronym must not collide with a held ticker.
+
+        "UNILEVER LTD" acronyms to "UL". If the file already holds UL, a
+        cash-in-lieu row taking that symbol would be deducted from the real
+        UL pool, understating its allowable cost.
+        """
+        from schwab_csv_tools.postprocess import process_csv
+
+        input_file = tmp_path / "in.csv"
+        with input_file.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.HEADERS)
+            writer.writeheader()
+            writer.writerow({
+                "Date": "01/15/2025", "Action": "Buy", "Symbol": "UL",
+                "Description": "UNILEVER PLC", "Price": "$50.00",
+                "Quantity": "10", "Fees & Comm": "", "Amount": "-$500.00",
+            })
+            writer.writerow({
+                "Date": "02/15/2025", "Action": "Cash In Lieu", "Symbol": "",
+                "Description": "UNILEVER LTD", "Price": "",
+                "Quantity": "", "Fees & Comm": "", "Amount": "$3.00",
+            })
+        output_file = tmp_path / "out.csv"
+
+        process_csv(input_file, output_file, mapping={}, verbose=False,
+                    write_log=False, fix_rounding=False)
+
+        with output_file.open() as f:
+            rows = list(csv.DictReader(f))
+
+        assert rows[0]["Symbol"] == "UL"
+        assert rows[1]["Symbol"] != "UL", "generated symbol collided with a real one"
+        assert rows[1]["Symbol"].startswith("UL")

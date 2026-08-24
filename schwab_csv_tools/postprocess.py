@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -29,6 +30,7 @@ from .common import (
     SECURITY_ACTIONS,
     ValidationError,
     generate_symbol_from_description,
+    looks_like_ticker,
     parse_currency,
     parse_schwab_date,
     truncate_text,
@@ -194,19 +196,28 @@ def validate_schwab_csv(filepath: Path, verbose: bool = False) -> list[str]:
 class SymbolTracker:
     """Encapsulates symbol assignment logic for missing symbols."""
 
-    def __init__(self, mapping: dict[str, str]):
+    def __init__(self, mapping: dict[str, str], existing_symbols: set[str] | None = None):
         """Initialize the symbol tracker.
 
         Args:
             mapping: Description → symbol mapping dict (case-insensitive)
+            existing_symbols: Symbols already present in the file. A generated
+                symbol must not collide with one of these: cgt-calc keys the
+                section 104 pool off the symbol, so a synthetic acronym landing
+                on a real ticker would silently merge an unrelated row into
+                that holding's pool.
         """
         self.mapping = mapping
+        self.existing_symbols = existing_symbols or set()
         self.description_to_symbol: dict[str, str] = {}
         self.symbol_counter: dict[str, int] = defaultdict(int)
         self.assignments: list[dict[str, str | int]] = []
+        self.remappings: list[dict[str, str | int]] = []
         self.missing_symbols = 0
         self.symbols_mapped = 0
         self.symbols_generated = 0
+        self.symbols_remapped = 0
+        self.generated_symbols: set[str] = set()
         self.missing_descriptions: dict[str, int] = defaultdict(int)
         self.symbol_assignment_counts: dict[str, dict[str, str | int]] = defaultdict(
             lambda: {"symbol": "", "count": 0}
@@ -244,6 +255,7 @@ class SymbolTracker:
             # No description, use fallback
             generated_symbol = f"UNKNOWN{row_num}"
             source = "FALLBACK"
+            self.generated_symbols.add(generated_symbol)
             if verbose:
                 print(
                     f"  ⚠ Warning: Row {row_num} has no description, "
@@ -308,19 +320,68 @@ class SymbolTracker:
         # Generate synthetic symbol
         symbol = generate_symbol_from_description(description)
 
-        # Handle collisions (only for different descriptions)
-        self.symbol_counter[symbol] += 1
-        if self.symbol_counter[symbol] > 1:
-            # Append numeric suffix
-            collision_num = self.symbol_counter[symbol] - 1
-            symbol = f"{symbol}{collision_num}"
-            if verbose:
-                print(f"  ⚠ Warning: Symbol collision, using {symbol}")
+        # Handle collisions, both against earlier generated symbols and
+        # against symbols already used by other rows in the file.
+        base_symbol = symbol
+        self.symbol_counter[base_symbol] += 1
+        collision_num = self.symbol_counter[base_symbol] - 1
+        while collision_num > 0 or symbol in self.existing_symbols:
+            collision_num += 1
+            symbol = f"{base_symbol}{collision_num}"
+            if symbol not in self.existing_symbols:
+                break
+        if symbol != base_symbol and verbose:
+            print(f"  ⚠ Warning: Symbol collision, using {symbol}")
 
         self.symbols_generated += 1
         # Remember this description→symbol mapping
         self.description_to_symbol[description_lower] = symbol
+        self.generated_symbols.add(symbol)
         return symbol, "GENERATED"
+
+    def remap_symbol(
+        self,
+        row: dict[str, str],
+        row_num: int,
+        verbose: bool = False,
+    ) -> None:
+        """Rewrite an existing symbol when the mapping file covers its description.
+
+        Schwab sometimes books the same security under a different symbol for a
+        while - a CUSIP instead of the ticker for an ADR trading with due bills,
+        for example. Those rows have a symbol already, so ``process_missing_symbol``
+        never touches them, yet they must end up under the ticker used by the rest
+        of the history or the holding is split into two unrelated pools.
+
+        Args:
+            row: CSV row dict (modified in-place)
+            row_num: Row number (1-indexed, accounting for header)
+            verbose: Print detailed output
+        """
+        description = row.get("Description", "").strip()
+        current_symbol = row.get("Symbol", "").strip()
+        mapped_symbol = self.mapping.get(description.lower())
+
+        if not mapped_symbol or mapped_symbol == current_symbol:
+            return
+
+        row["Symbol"] = mapped_symbol
+        self.symbols_remapped += 1
+        self.remappings.append(
+            {
+                "row": row_num,
+                "description": description,
+                "symbol": mapped_symbol,
+                "source": f"REMAPPED from {current_symbol}",
+            }
+        )
+
+        if verbose:
+            desc_short = truncate_text(description, DESC_SHORT)
+            print(
+                f"  Row {row_num}: {desc_short} → symbol "
+                f"{current_symbol} remapped to {mapped_symbol}"
+            )
 
     def write_log(
         self, output_dir: Path, input_stem: str, verbose: bool = False
@@ -332,7 +393,10 @@ class SymbolTracker:
             input_stem: Input filename stem
             verbose: Print log file path
         """
-        if not self.assignments:
+        changes = sorted(
+            self.assignments + self.remappings, key=lambda change: change["row"]
+        )
+        if not changes:
             return
 
         log_file = output_dir / f"{input_stem}_symbol_changes.log"
@@ -342,7 +406,7 @@ class SymbolTracker:
                 fieldnames=["Row", "Original Description", "Assigned Symbol", "Source"],
             )
             log_writer.writeheader()
-            for change in self.assignments:
+            for change in changes:
                 log_writer.writerow(
                     {
                         "Row": change["row"],
@@ -578,6 +642,72 @@ def _filter_by_tax_year(
     return filtered_rows, filtered_count
 
 
+def split_is_suspicious(
+    symbols: set[str],
+    generated_symbols: frozenset[str] = frozenset(),
+) -> bool:
+    """Check whether a set of symbols for one description looks like one security.
+
+    The dangerous signature is a real ticker sitting alongside a CUSIP or an
+    internal code: that is Schwab booking a single holding two ways. Two codes
+    with no ticker are usually genuinely different securities sharing a generic
+    description (several matured treasury bills, say), and two tickers are
+    usually a rename, which cgt-calc already knows how to follow.
+
+    Symbols this run synthesised from a description are not evidence of
+    anything, and must not count as the ticker half of the pair. They are
+    acronyms and so are shaped exactly like tickers - "US TREASURY
+    BILXXX**MATURED**" becomes "UTB" - so counting them would turn the very
+    case described above as safe into a suggestion to merge several distinct
+    treasury bills into one pool.
+
+    Args:
+        symbols: Symbols a single description appears under
+        generated_symbols: Symbols synthesised from descriptions in this run
+
+    Returns:
+        True if the split most likely refers to one security
+    """
+    tickers = {
+        symbol
+        for symbol in symbols
+        if looks_like_ticker(symbol) and symbol not in generated_symbols
+    }
+    return 0 < len(tickers) < len(symbols)
+
+
+def detect_symbol_splits(rows: list[dict[str, str]]) -> dict[str, set[str]]:
+    """Find descriptions that appear under more than one symbol.
+
+    Schwab sometimes books one security under two identifiers: a CUSIP while an
+    ADR trades with due bills, or an internal code that later changes. cgt-calc
+    keys the section 104 pool off the symbol, so a split description quietly
+    becomes two unrelated pools. Acquisitions land on one and disposals on the
+    other, and the first sale under the wrong symbol fails with an empty pool -
+    or worse, succeeds against the wrong cost basis.
+
+    Args:
+        rows: CSV row dicts, after any symbol fixing has been applied
+
+    Returns:
+        Mapping of description to the set of symbols it appears under,
+        containing only descriptions with more than one symbol
+    """
+    by_description: dict[str, set[str]] = defaultdict(set)
+
+    for row in rows:
+        description = row.get("Description", "").strip()
+        symbol = row.get("Symbol", "").strip()
+        if description and symbol:
+            by_description[description].add(symbol)
+
+    return {
+        description: symbols
+        for description, symbols in by_description.items()
+        if len(symbols) > 1
+    }
+
+
 def _write_csv_rows(
     output_file: Path, headers: list[str], rows: list[dict[str, str]]
 ) -> None:
@@ -602,6 +732,7 @@ def process_csv(
     write_log: bool = False,
     fix_rounding: bool = False,
     tax_year_end: datetime | None = None,
+    remap_symbols: bool = False,
 ) -> dict[str, Any]:
     """Process CSV and fix missing symbols and rounding errors.
 
@@ -616,6 +747,8 @@ def process_csv(
             where quantity * price ≠ amount
         tax_year_end: Optional UK tax year end date; filter out
             transactions after this date
+        remap_symbols: Also rewrite symbols that are present but disagree
+            with the mapping file (e.g. a CUSIP used instead of the ticker)
 
     Returns:
         Dictionary with statistics
@@ -633,21 +766,31 @@ def process_csv(
     if tax_year_end:
         rows, filtered_count = _filter_by_tax_year(rows, tax_year_end, verbose)
 
-    # Step 3: Fix missing symbols
-    symbol_tracker = SymbolTracker(mapping)
+    # Step 3: Fix missing symbols, and rewrite mismatched ones if asked to
+    existing_symbols = {
+        row.get("Symbol", "").strip() for row in rows if row.get("Symbol", "").strip()
+    }
+    symbol_tracker = SymbolTracker(mapping, existing_symbols)
     for row_num, row in enumerate(rows, start=2):  # start=2 to account for header
         if not row.get("Symbol", "").strip():
             symbol_tracker.process_missing_symbol(row, row_num, verbose)
+        elif remap_symbols:
+            symbol_tracker.remap_symbol(row, row_num, verbose)
 
     # Step 4: Fix rounding errors if requested
     rounding_fixer = RoundingFixer()
     if fix_rounding:
         rounding_fixer.process_rows(rows, verbose)
 
-    # Step 5: Write output CSV
+    # Step 5: Look for descriptions still split across symbols. Done after the
+    # fixes above so that anything already resolved by the mapping is not
+    # reported as a problem.
+    symbol_splits = detect_symbol_splits(rows)
+
+    # Step 6: Write output CSV
     _write_csv_rows(output_file, headers, rows)
 
-    # Step 6: Write logs if requested
+    # Step 7: Write logs if requested
     if write_log:
         symbol_tracker.write_log(input_file.parent, input_file.stem, verbose)
         rounding_fixer.write_log(input_file.parent, input_file.stem, verbose)
@@ -659,6 +802,10 @@ def process_csv(
         "missing_symbols": symbol_tracker.missing_symbols,
         "mapped": symbol_tracker.symbols_mapped,
         "generated": symbol_tracker.symbols_generated,
+        "remapped": symbol_tracker.symbols_remapped,
+        "remappings": symbol_tracker.remappings,
+        "symbol_splits": symbol_splits,
+        "generated_symbols": frozenset(symbol_tracker.generated_symbols),
         "rounding_fixed": rounding_fixer.fixes_count,
         "rounding_affected_symbols": rounding_fixer.get_affected_symbols(),
         "missing_descriptions": symbol_tracker.missing_descriptions,
@@ -748,6 +895,15 @@ Examples:
         help="UK tax year (filters out transactions after April 5, YEAR+1)",
     )
 
+    parser.add_argument(
+        "--remap-symbols",
+        action="store_true",
+        help=(
+            "also rewrite symbols that are present but disagree with the "
+            "mapping file (e.g. a CUSIP used instead of the ticker)"
+        ),
+    )
+
     return parser
 
 
@@ -814,6 +970,7 @@ def main() -> int:
             args.write_log,
             args.fix_rounding,
             tax_year_end,
+            args.remap_symbols,
         )
     except Exception as e:
         print(f"✗ Error: {e}", file=sys.stderr)
@@ -855,6 +1012,73 @@ def main() -> int:
                 f"  Total generated: {stats['generated']:,} symbol(s) from descriptions"
             )
 
+    if stats["remapped"] > 0:
+        print()
+        print("Symbols remapped to match the mapping file:")
+        remap_counts: dict[tuple[str, str, str], int] = defaultdict(int)
+        for remap in stats["remappings"]:
+            key = (
+                str(remap["description"]),
+                str(remap["source"]),
+                str(remap["symbol"]),
+            )
+            remap_counts[key] += 1
+        for (desc, source, symbol), count in sorted(remap_counts.items()):
+            desc_display = truncate_text(desc, DESC_MEDIUM)
+            print(f"  • {desc_display}: {source} → {symbol} ({count:,} row(s))")
+
+    splits = stats["symbol_splits"]
+    generated = stats["generated_symbols"]
+    suspicious = {
+        desc: symbols
+        for desc, symbols in splits.items()
+        if split_is_suspicious(symbols, generated)
+    }
+    other_splits = {desc: symbols for desc, symbols in splits.items() if desc not in suspicious}
+
+    if suspicious:
+        print()
+        print(
+            f"⚠ Warning: {len(suspicious)} description(s) appear under both a ticker "
+            "and a code:"
+        )
+        for desc, symbols in sorted(suspicious.items()):
+            print(f"  • {truncate_text(desc, DESC_MEDIUM)}")
+            print(f"      symbols: {', '.join(sorted(symbols))}")
+        print()
+        print(
+            "  Each symbol becomes a separate section 104 pool in cgt-calc, so one\n"
+            "  holding booked two ways is tracked as two unrelated positions. If "
+            "these\n"
+            "  are the same security, add them to your mapping file and re-run with\n"
+            "  --remap-symbols:"
+        )
+        print()
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(["Description", "Symbol"])
+        for desc, symbols in sorted(suspicious.items()):
+            ticker = sorted(
+                symbol
+                for symbol in symbols
+                if looks_like_ticker(symbol) and symbol not in generated
+            )[0]
+            writer.writerow([desc, ticker])
+        for line in buffer.getvalue().splitlines():
+            print(f"    {line}")
+
+    if other_splits and verbose:
+        print()
+        print(
+            f"  {len(other_splits)} further description(s) span multiple symbols; "
+            "these are\n"
+            "  usually distinct securities sharing a generic description, or a "
+            "ticker\n"
+            "  rename that cgt-calc already follows:"
+        )
+        for desc, symbols in sorted(other_splits.items()):
+            print(f"  • {truncate_text(desc, DESC_MEDIUM)}: {', '.join(sorted(symbols))}")
+
     print()
     print("Statistics:")
     print(f"  Total rows: {stats['total_rows']:,}")
@@ -864,6 +1088,7 @@ def main() -> int:
     print(f"  Missing symbols: {stats['missing_symbols']:,}")
     print(f"  Symbols mapped: {stats['mapped']:,}")
     print(f"  Symbols generated: {stats['generated']:,}")
+    print(f"  Symbols remapped: {stats['remapped']:,}")
     print(f"  Rounding errors fixed: {stats['rounding_fixed']:,}")
 
     # Show symbols affected by rounding fixes if any
