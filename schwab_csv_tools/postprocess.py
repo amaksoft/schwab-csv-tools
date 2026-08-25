@@ -79,6 +79,7 @@ def load_mapping_file(filepath: Path, verbose: bool = False) -> dict[str, str]:
 
     mappings = {}
     duplicates = []
+    non_tickers = []
 
     with filepath.open(encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -125,8 +126,24 @@ def load_mapping_file(filepath: Path, verbose: bool = False) -> dict[str, str]:
             if description_lower in mappings:
                 duplicates.append((line_num, description))
 
+            if not looks_like_ticker(symbol):
+                non_tickers.append((line_num, description, symbol))
+
             # Last entry wins
             mappings[description_lower] = symbol
+
+    if non_tickers:
+        # Not an error: a holding with no exchange listing, such as a Treasury
+        # bill, has only a CUSIP to be identified by. But a target that is not
+        # ticker-shaped is usually a placeholder left in by mistake, and it
+        # travels all the way into the report, so say so whether or not the
+        # caller asked for detail.
+        print(
+            f"  ⚠ Warning: {len(non_tickers)} mapping target(s) in {filepath} "
+            f"do not look like tickers"
+        )
+        for line_num, description, symbol in non_tickers:
+            print(f"    Line {line_num}: {description[:50]} → {symbol}")
 
     if verbose:
         print(f"  Loaded {len(mappings)} mapping(s)")
