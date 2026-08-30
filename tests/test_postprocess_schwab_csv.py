@@ -634,3 +634,66 @@ class TestGeneratedSymbolCollisions:
         assert rows[0]["Symbol"] == "UL"
         assert rows[1]["Symbol"] != "UL", "generated symbol collided with a real one"
         assert rows[1]["Symbol"].startswith("UL")
+
+
+class TestReorganisationMoney:
+    """Schwab writes a price onto rows where nothing was bought or sold."""
+
+    def test_price_is_cleared_from_a_stock_split(self) -> None:
+        """The split-adjusted price is not a price paid for anything."""
+        from schwab_csv_tools.postprocess import strip_reorganisation_money
+
+        rows = [
+            {
+                "Date": "11/17/2025",
+                "Action": "Stock Split",
+                "Symbol": "NFLX",
+                "Quantity": "126",
+                "Price": "$111.217",
+                "Fees & Comm": "",
+                "Amount": "",
+            }
+        ]
+
+        assert strip_reorganisation_money(rows) == 1
+        assert rows[0]["Price"] == ""
+        # The unit count is the whole point of the row and must survive.
+        assert rows[0]["Quantity"] == "126"
+
+    def test_reverse_split_without_money_is_untouched(self) -> None:
+        """A row that already states no money is not counted as changed."""
+        from schwab_csv_tools.postprocess import strip_reorganisation_money
+
+        rows = [
+            {
+                "Date": "12/09/2025",
+                "Action": "Reverse Split",
+                "Symbol": "UL",
+                "Quantity": "-185.0291",
+                "Price": "",
+                "Fees & Comm": "",
+                "Amount": "",
+            }
+        ]
+
+        assert strip_reorganisation_money(rows) == 0
+        assert rows[0]["Quantity"] == "-185.0291"
+
+    def test_a_buy_keeps_its_price(self) -> None:
+        """Only reorganisations are stripped; a real trade is left alone."""
+        from schwab_csv_tools.postprocess import strip_reorganisation_money
+
+        rows = [
+            {
+                "Date": "11/17/2025",
+                "Action": "Buy",
+                "Symbol": "NFLX",
+                "Quantity": "1",
+                "Price": "$111.217",
+                "Fees & Comm": "",
+                "Amount": "-$111.22",
+            }
+        ]
+
+        assert strip_reorganisation_money(rows) == 0
+        assert rows[0]["Price"] == "$111.217"
