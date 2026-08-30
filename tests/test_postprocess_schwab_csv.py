@@ -86,6 +86,44 @@ class TestMappingFile:
         finally:
             mapping_file.unlink()
 
+    def test_load_mapping_warns_on_non_ticker_target(self, capsys):
+        """Warn when a mapping points at a CUSIP or other non-ticker."""
+        from schwab_csv_tools.postprocess import load_mapping_file
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write("Description,Symbol\n")
+            f.write("VANGUARD S&P 500 UCITS ETF,G9T17W137\n")
+            f.write("APPLE INC,AAPL\n")
+            mapping_file = Path(f.name)
+
+        try:
+            mappings = load_mapping_file(mapping_file)
+            # The mapping is still applied; this is a warning, not a rejection.
+            assert mappings["vanguard s&p 500 ucits etf"] == "G9T17W137"
+            out = capsys.readouterr().out
+            assert "do not look like tickers" in out
+            assert "G9T17W137" in out
+            # The valid ticker is not reported.
+            assert "AAPL" not in out
+        finally:
+            mapping_file.unlink()
+
+    def test_load_mapping_silent_when_all_targets_are_tickers(self, capsys):
+        """A mapping file of real tickers produces no warning."""
+        from schwab_csv_tools.postprocess import load_mapping_file
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            f.write("Description,Symbol\n")
+            f.write("APPLE INC,AAPL\n")
+            f.write("BERKSHIRE HATHAWAY B,BRK.B\n")
+            mapping_file = Path(f.name)
+
+        try:
+            load_mapping_file(mapping_file)
+            assert "do not look like tickers" not in capsys.readouterr().out
+        finally:
+            mapping_file.unlink()
+
     def test_load_mapping_duplicates(self):
         """Test duplicate description handling (last wins)."""
         from schwab_csv_tools.postprocess import load_mapping_file
