@@ -15,7 +15,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 # Import shared utilities from common module
 from .common import (
@@ -741,6 +741,54 @@ def _write_csv_rows(
         writer.writerows(rows)
 
 
+# Actions Schwab exports for a share reorganisation. A split or consolidation
+# neither buys nor sells anything, so the money columns have nothing to state.
+REORGANISATION_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"Stock Split", "Reverse Split"}
+)
+
+# Money columns, which a reorganisation row must leave empty.
+MONEY_COLUMNS: Final[tuple[str, ...]] = ("Price", "Fees & Comm", "Amount")
+
+
+def strip_reorganisation_money(
+    rows: list[dict[str, str]], verbose: bool = False
+) -> int:
+    """Blank the money columns Schwab writes on a reorganisation row.
+
+    Schwab puts the post-split price on a "Stock Split" row. Nothing was
+    bought or sold, so that figure is not a price paid for anything, and
+    cgt-calc refuses a reorganisation carrying money rather than guess what
+    it meant. Blanking it here keeps the refusal available for the case it
+    is meant for: cash that really did change hands.
+
+    Returns:
+        The number of rows changed.
+
+    """
+    changed = 0
+    for row in rows:
+        if row.get("Action", "").strip() not in REORGANISATION_ACTIONS:
+            continue
+        present = [
+            column
+            for column in MONEY_COLUMNS
+            if column in row and row[column].strip() not in {"", "$0.00", "0"}
+        ]
+        if not present:
+            continue
+        for column in present:
+            row[column] = ""
+        changed += 1
+        if verbose:
+            print(
+                f"  Cleared {', '.join(present)} on "
+                f"{row.get('Action', '').strip()} row for "
+                f"{row.get('Symbol', '').strip()} on {row.get('Date', '').strip()}"
+            )
+    return changed
+
+
 def process_csv(
     input_file: Path,
     output_file: Path,
@@ -799,6 +847,11 @@ def process_csv(
     if fix_rounding:
         rounding_fixer.process_rows(rows, verbose)
 
+    # Step 4b: Drop the money Schwab writes onto reorganisation rows. After
+    # the rounding fixer, which reconciles quantity * price against amount
+    # and has nothing to check once these are blank.
+    reorganisations_cleared = strip_reorganisation_money(rows, verbose)
+
     # Step 5: Look for descriptions still split across symbols. Done after the
     # fixes above so that anything already resolved by the mapping is not
     # reported as a problem.
@@ -824,6 +877,7 @@ def process_csv(
         "symbol_splits": symbol_splits,
         "generated_symbols": frozenset(symbol_tracker.generated_symbols),
         "rounding_fixed": rounding_fixer.fixes_count,
+        "reorganisations_cleared": reorganisations_cleared,
         "rounding_affected_symbols": rounding_fixer.get_affected_symbols(),
         "missing_descriptions": symbol_tracker.missing_descriptions,
         "symbol_assignments": symbol_tracker.symbol_assignment_counts,
@@ -1107,6 +1161,7 @@ def main() -> int:
     print(f"  Symbols generated: {stats['generated']:,}")
     print(f"  Symbols remapped: {stats['remapped']:,}")
     print(f"  Rounding errors fixed: {stats['rounding_fixed']:,}")
+    print(f"  Reorganisation rows cleared: {stats['reorganisations_cleared']:,}")
 
     # Show symbols affected by rounding fixes if any
     if stats["rounding_fixed"] > 0 and stats["rounding_affected_symbols"]:
